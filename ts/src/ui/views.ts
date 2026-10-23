@@ -179,7 +179,7 @@ export class AttitudeIndicator {
     const ctx = cv.getContext('2d')!; ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     const r = size / 2, ppd = 3.2, ac = sim.aircraft, fMono = this.pal.get('--f-mono');
     ctx.save(); ctx.beginPath(); ctx.arc(r, r, r, 0, 7); ctx.clip();
-    ctx.translate(r, r); ctx.rotate(-ac.phi); ctx.translate(0, (ac.theta / D2R) * ppd);
+    ctx.translate(r, r); ctx.rotate(ac.phi); ctx.translate(0, (ac.theta / D2R) * ppd);
     ctx.fillStyle = '#2c6aa6'; ctx.fillRect(-200, -400, 400, 400);
     ctx.fillStyle = '#7a4f28'; ctx.fillRect(-200, 0, 400, 400);
     ctx.strokeStyle = '#ffffff'; ctx.fillStyle = '#ffffff'; ctx.lineWidth = 1.5;
@@ -197,7 +197,7 @@ export class AttitudeIndicator {
       const a = (b - 90) * D2R, l = b % 30 ? 6 : 10;
       ctx.beginPath(); ctx.moveTo(Math.cos(a) * (r - 2), Math.sin(a) * (r - 2)); ctx.lineTo(Math.cos(a) * (r - 2 - l), Math.sin(a) * (r - 2 - l)); ctx.stroke();
     }
-    ctx.rotate(-ac.phi); ctx.fillStyle = '#ffffff';
+    ctx.rotate(ac.phi); ctx.fillStyle = '#ffffff';
     ctx.beginPath(); ctx.moveTo(0, -r + 14); ctx.lineTo(-5, -r + 22); ctx.lineTo(5, -r + 22); ctx.closePath(); ctx.fill();
     ctx.restore();
     ctx.strokeStyle = '#f2b33d'; ctx.lineWidth = 3.5; ctx.lineCap = 'round'; ctx.beginPath();
