@@ -1,5 +1,7 @@
 # Circuit Autopilot Sim
 
+**▶ Try it in your browser: https://conradmicallef.github.io/autopilot/**
+
 A Cessna 172P flies a traffic circuit under autopilot: take-off, circuit, approach and landing. It goes around when the approach is unstable, straightens up for crosswind landings, and handles engine failures.
 
 The simulation core is written in Rust. It runs natively for test suites and Monte Carlo batches, or in the browser as WebAssembly.
