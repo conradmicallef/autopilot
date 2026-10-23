@@ -435,7 +435,7 @@ The view is a perspective renderer drawn on the 2D canvas, so there is no depend
 **Random airborne start** (page buttons *Random state* and *Random engine out*; `circuitsim randomland N`). The aircraft is placed 1.5–6 km from the field at a random height, heading, speed and attitude, with enough energy to reach the runway. Up to 70° bank and ±25° pitch are allowed. The autopilot then:
 1. **Recover:** rolls wings level at 20°/s. It unloads if α > 0.2 and never pulls beyond 60° bank. It holds level for 2 s. With the engine out, it pitches for best glide instead.
 2. **Rejoin:** flies a Dubins path at 80 kt and 25° bank to a final fix 1.5–6 km out. The fix distance follows the height to lose (descent gradient 0.09) or gain (climb 0.06). The aircraft slows to the base speed with flap 20 in the last 1.5 km.
-3. **Final:** flies the normal final and landing. With the engine out, it hands over to the glide planner after recovery. If the aircraft is far too high, it orbits down first (30° bank, 3 km from the field).
+3. **Final:** flies the normal final and landing. With the engine out, it hands over to the glide planner after recovery. If the aircraft is far too high, it glides to the field first and orbits down beside it (30° bank, centred 700 m abeam the runway's middle on the aircraft's side).
 
 **Touchdown accuracy.** Every runway landing now scores 100 points on the target touchdown point, minus 1 point per 3 m of miss in either direction. It is reported per suite as an average and counts in the autotune closeness term. The target is:
 - normal circuits: the aim point plus the planned float
@@ -464,6 +464,8 @@ Two changes to power-off turns were tried and dropped:
 
 The power-off plan's height budget has no slack for a wider or earlier turn, so those turns stay as planned.
 
+**Orbit down beside the field, not where the engine stopped (23 Oct, later).** With more than 150 m of height to spare, the glide used to orbit wherever the aircraft was. It could be anywhere within 3 km of the field, so it spent height far out, with the runway at the edge of reach. Now it glides straight to an orbit point 700 m abeam the runway's middle, on its own side. It orbits there at 30° until the surplus is under 70 m, then flies the planned path. Random engine-out starts that need an orbit: before, 45 of 47 orbited more than 1.5 km out and 37 landed. Now 34 of 34 orbit within 1.2 km and all land (`examples/orbit_check.rs`). Random engine-out starts overall: 49 → 57 of 100, with 96 runway landings, up from 88.
+
 **Take-off flap** is 10°, retracted at 300 ft (seen in the traces as `fl10`).
 
 ## Results
@@ -478,7 +480,7 @@ With the scoring from the 23 Oct review: every landing is scored on touchdown sp
 | `montecarlo 400`, normal circuits | 83% | 84 |
 | `montecarlo 400`, engine failures | 37%; 76/113 (67%) within the ceiling | 24 |
 | `randomland 100`, engine running | 85/100 (upsets 48/56) | 83 |
-| `randomland 100`, engine out | 49/100 | 31 |
+| `randomland 100`, engine out | 57/100 | 22 |
 | `xw_sweep` (crosswind-leg failures) | 8/71 | |
 
 The stall-margin bank limit costs some glide-back reach. Before it was added, the results were engine 25/60, Monte Carlo engine failures 36%, and xw_sweep 14/71. The limit is kept because a turn at 45° bank and best-glide speed has only about 1.1× the stall margin.

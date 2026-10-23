@@ -220,9 +220,11 @@ const LINE_CAPTURE_K: f64 = 0.8;
 /// up to `PLAN_KEEP`), m: re-planning mid-turn costs height, so only for a clear gain.
 const SWITCH_GAIN: f64 = 20.0;
 const PLAN_KEEP: f64 = 60.0;
-/// Power-off orbit down: entered within `LOITER_RANGE` m of the field when the plan has more than
-/// `LOITER_ENTER` m of height to spare, left for a fresh plan below `LOITER_EXIT`; flown at `LOITER_BANK`°.
-const LOITER_RANGE: f64 = 3000.0;
+/// Power-off orbit down: when the plan has more than `LOITER_ENTER` m of height to spare, the aircraft
+/// glides to a point beside the field (`HIGH_KEY_OFFSET` m abeam the runway's middle, on its own side) and
+/// orbits there at `LOITER_BANK`° until the surplus is under `LOITER_EXIT`. Spare height is spent where a
+/// landing on either end stays in easy reach, never out where it was when the engine stopped.
+const HIGH_KEY_OFFSET: f64 = 700.0;
 const LOITER_ENTER: f64 = 150.0;
 const LOITER_EXIT: f64 = 70.0;
 const LOITER_BANK: f64 = 30.0;
@@ -300,6 +302,9 @@ pub struct Autopilot {
     eo_path: Option<EoPath>,
     /// Orbiting down over the field to lose surplus height before the power-off path (+1 left, 0 = not).
     loiter: f64,
+    /// The orbit's centre, and whether the aircraft is still gliding to it.
+    loiter_centre: [f64; 2],
+    loiter_transit: bool,
     /// Started from a random state with the engine out: the engine-failure decision waits for the
     /// recovery to finish.
     pending_engine_out: bool,
@@ -363,6 +368,8 @@ impl Autopilot {
             drag: 0,
             eo_path: None,
             loiter: 0.0,
+            loiter_centre: [0.0, 0.0],
+            loiter_transit: false,
             pending_engine_out: false,
             recovered_for: 0.0,
             rejoin: None,
@@ -1161,9 +1168,32 @@ impl Autopilot {
         let bank = self.planner.spec.turn_bank;
         // far too high close to the field: orbit down first (a path cannot burn it all)
         if self.loiter != 0.0 {
-            c.phi = self.loiter * LOITER_BANK * D2R;
+            let [cx, cy] = self.loiter_centre;
+            let (dx, dy) = (ac.x - cx, ac.y - cy);
+            let d = dx.hypot(dy);
+            let v = ac.v.max(20.0);
+            let r = v * v / (G * (LOITER_BANK * D2R).tan());
+            if self.loiter_transit && d < r + 100.0 {
+                self.loiter_transit = false;
+                // orbit the way the aircraft is already turning toward the centre
+                let to_c = (-dy).atan2(-dx);
+                self.loiter = if wrap_pi(to_c - ac.track(wind)) >= 0.0 { 1.0 } else { -1.0 };
+                self.log(ac, "ORBIT", Some("Beside the field: orbiting down".into()));
+            }
+            if self.loiter_transit {
+                // straight to the orbit point at best glide
+                let track = (-dy).atan2(-dx);
+                c.phi = self.guidance.bank_for(ac, wind, track, self.circuit.spec.bank_max);
+                self.fma = Fma::new("ENG OUT", "GLIDE", "TO FIELD");
+            } else {
+                // circle of radius r about the centre: tangent plus a correction toward the circle
+                let sgn = self.loiter;
+                let track = dy.atan2(dx) + sgn * (PI / 2.0 + (2.0 * (d - r) / r).atan());
+                let corr = self.guidance.bank_for(ac, wind, track, 15.0 * D2R);
+                c.phi = clamp(sgn * LOITER_BANK * D2R + corr, -(LOITER_BANK + 10.0) * D2R, (LOITER_BANK + 10.0) * D2R);
+                self.fma = Fma::new("ENG OUT", "GLIDE", "ORBIT");
+            }
             c.theta = self.glide_pitch(ac, self.planner.turn_speed(ac, ac.shaper.phi, self.eo_flaps), dt);
-            self.fma = Fma::new("ENG OUT", "GLIDE", "ORBIT");
             if t - self.last_assess > 1.0 {
                 self.last_assess = t;
                 let fresh = self.planner.plan(ac, w, Some(&end));
@@ -1215,14 +1245,15 @@ impl Autopilot {
             self.last_assess = t;
             // keep the plan while it works, unless a fresh one is clearly better: it reaches when this one
             // no longer does, or has `SWITCH_GAIN` more height in hand
-            let near_field = (ac.x - 0.5 * self.planner.runway.length).hypot(ac.y) < LOITER_RANGE;
-            if near_field && g.surplus > LOITER_ENTER {
+            if g.surplus > LOITER_ENTER {
                 let fresh = self.planner.plan(ac, w, Some(&end));
                 if fresh.surplus > LOITER_ENTER {
-                    // orbit toward the runway side of the aircraft
-                    let to_rwy = (-ac.y).atan2(0.5 * self.planner.runway.length - ac.x);
-                    self.loiter = if wrap_pi(to_rwy - ac.track(wind)) >= 0.0 { 1.0 } else { -1.0 };
-                    self.log(ac, "ORBIT", Some(format!("{} m of height to lose: orbiting down", fresh.surplus.round())));
+                    // glide to the orbit point beside the field, on the aircraft's side of the runway
+                    let side = if ac.y >= 0.0 { 1.0 } else { -1.0 };
+                    self.loiter_centre = [0.5 * self.planner.runway.length, side * HIGH_KEY_OFFSET];
+                    self.loiter_transit = true;
+                    self.loiter = 1.0;
+                    self.log(ac, "ORBIT", Some(format!("{} m of height to lose: gliding to the field to orbit down", fresh.surplus.round())));
                     return;
                 }
             }
