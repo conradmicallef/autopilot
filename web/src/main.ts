@@ -218,7 +218,7 @@ class App {
       const info = (PHASES as Record<string, { name: string; token: string } | undefined>)[e.phase];
       const marker: Record<string, [string, string]> = {
         DESCENT: ['Begin descent', '--muted'], ENGINE_FAILURE: ['Engine failure', '--ph-eo'], STRETCH: ['Stretch to runway', '--ph-eo'],
-      REPLAN: ['New glide plan', '--ph-eo'], EXTEND: ['Longer path (high)', '--ph-eo'], ORBIT: ['Orbit down (high)', '--ph-eo']
+      REPLAN: ['New glide plan', '--ph-eo'], EXTEND: ['Longer path (high)', '--ph-eo']
       };
       const [name, tok] = info ? [info.name, info.token] : marker[e.phase] ?? [e.phase.replace(/_/g, ' ').toLowerCase(), '--muted'];
       return `<span class="mut l">${mmss(e.t)}</span><span class="ph" style="color:var(${tok})">${name}${e.note ? `<small>${e.note}</small>` : ''}</span>`

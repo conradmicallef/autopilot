@@ -9,6 +9,9 @@
 //! * a turn at bank φ flown at `turn_speed`: load factor n = 1/cos φ and the same lift coefficient as a
 //!   1 g glide at turn_speed/√n, so it costs n × arc length / L/D(turn_speed/√n).
 //!
+//! Too high, the path is stretched instead: it joins up to `STRETCH_MAX` out on the extended centreline,
+//! which spends the height on the way out and back rather than in an orbit.
+//!
 //! The plan picks the longest final (up to `fix_max`) that is reachable with the planning margins at the
 //! nominal aim point; if none is, nearer aim points down to `aim_min` past the threshold (any part of the
 //! runway beats a field). Both runway directions are planned and the one with more height in hand wins.
@@ -36,6 +39,9 @@ const ROLL_RATE: f64 = 8.0 * D2R;
 pub const TURN_STALL_MARGIN: f64 = 1.2;
 /// Final-fix distances tried, m apart.
 const FIX_STEP: f64 = 50.0;
+/// Furthest join for a stretched path when too high, m before the threshold, searched in this step.
+const STRETCH_MAX: f64 = 6000.0;
+const STRETCH_STEP: f64 = 200.0;
 const AIM_STEP: f64 = 60.0;
 /// Shortest straight final before the touchdown, m: time to settle on the centreline and flare.
 pub const MIN_FINAL: f64 = 150.0;
@@ -327,13 +333,31 @@ impl GlidePlanner {
             let excess = (a.available - a.required - burnable).max(0.0);
             a.aim + excess / g_full
         };
-        let rank = |a: &GlideAssessment| ((-(a.surplus / a.required.max(1.0)).min(reserve)), (predicted(a) - nominal).abs(), -(a.ip_distance + a.aim));
-        let better = |a: (f64, f64, f64), b: (f64, f64, f64)| {
-            a.0 < b.0 - 1e-6 || (a.0 <= b.0 + 1e-6 && (a.1 < b.1 - 1e-6 || (a.1 <= b.1 + 1e-6 && a.2 < b.2)))
+        // A join beyond `fix_max` stretches the path (out along the extended centreline, then back on a long
+        // final) to spend height that flap can't burn; it ranks after the touchdown (in 30 m steps, so a
+        // stretch is taken only for a real gain), and the least stretch wins among equals.
+        let rank = |a: &GlideAssessment| {
+            [
+                -(a.surplus / a.required.max(1.0)).min(reserve),
+                ((predicted(a) - nominal).abs() / 30.0).floor(),
+                (a.ip_distance - self.spec.fix_max).max(0.0),
+                -(a.ip_distance + a.aim),
+            ]
+        };
+        let better = |a: [f64; 4], b: [f64; 4]| {
+            for k in 0..4 {
+                if a[k] < b[k] - 1e-6 {
+                    return true;
+                }
+                if a[k] > b[k] + 1e-6 {
+                    return false;
+                }
+            }
+            false
         };
         let mut best: Option<GlideAssessment> = None;
         let mut miss: Option<GlideAssessment> = None;
-        let mut d = self.spec.fix_max;
+        let mut d = STRETCH_MAX;
         while d >= -(far - MIN_FINAL) {
             // the path's height does not depend on the aim, only the final does: assess once per join
             let base = self.assess(ac, wind, end, d, (-d + MIN_FINAL).max(self.spec.aim_min));
@@ -350,7 +374,7 @@ impl GlidePlanner {
                     miss = Some(a);
                 }
             }
-            d -= FIX_STEP;
+            d -= if d > self.spec.fix_max { STRETCH_STEP } else { FIX_STEP };
         }
         finish(best.or(miss).expect("at least one option"))
     }

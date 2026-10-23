@@ -1,4 +1,5 @@
-// Random engine-out starts that orbit down: where the orbits are flown and how the flights end.
+// Random engine-out starts: how far out the power-off plans join the centreline (a stretched path when
+// too high), how far from the field the aircraft goes after the failure, and how the flights end.
 use circuitsim::airfield::high_circuit;
 use circuitsim::atmosphere::{Rng, WindSettings};
 use circuitsim::scenarios::*;
@@ -14,18 +15,19 @@ fn main() {
         s.start_airborne(&a);
         let mut worst: f64 = 0.0;
         let mut orbiting = false;
+        let mut join: f64 = 0.0;
         while !s.finished() && s.t < 1500.0 {
             s.step();
-            let f = s.autopilot.fma.lat.clone();
-            if f == "ORBIT" { orbiting = true; worst = worst.max((s.aircraft.x - 600.0).hypot(s.aircraft.y)); }
+            if let Some(g) = &s.autopilot.glide { if g.ip_distance > 1250.0 { orbiting = true; } join = join.max(g.ip_distance); }
+            if s.autopilot.engine_out.is_some() { worst = worst.max((s.aircraft.x - 600.0).hypot(s.aircraft.y)); }
         }
         if orbiting {
             n += 1;
             let pass = s.passed();
             if pass { ok += 1; }
-            if worst > 1500.0 { far += 1; }
-            println!("#{i:3} start ({:6.0},{:6.0}) {:5.0} ft: orbit up to {:5.0} m from the field's middle, {}", a.x, a.y, a.h / 0.3048, worst, if pass { "landed" } else { "failed" });
+            if worst > 4000.0 { far += 1; }
+            println!("#{i:3} start ({:6.0},{:6.0}) {:5.0} ft: joins up to {:5.0} m out, up to {:5.0} m from the field's middle, {}", a.x, a.y, a.h / 0.3048, join, worst, if pass { "landed" } else { "failed" });
         }
     }
-    println!("{n} orbited, {ok} landed, {far} orbited more than 1.5 km from the field");
+    println!("{n} stretched (joined beyond 1.25 km), {ok} of them landed, {far} went more than 4 km from the field");
 }

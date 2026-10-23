@@ -435,7 +435,7 @@ The view is a perspective renderer drawn on the 2D canvas, so there is no depend
 **Random airborne start** (page buttons *Random state* and *Random engine out*; `circuitsim randomland N`). The aircraft is placed 1.5–6 km from the field at a random height, heading, speed and attitude, with enough energy to reach the runway. Up to 70° bank and ±25° pitch are allowed. The autopilot then:
 1. **Recover:** rolls wings level at 20°/s. It unloads if α > 0.2 and never pulls beyond 60° bank. It holds level for 2 s. With the engine out, it pitches for best glide instead.
 2. **Rejoin:** flies a Dubins path at 80 kt and 25° bank to a final fix 1.5–6 km out. The fix distance follows the height to lose (descent gradient 0.09) or gain (climb 0.06). The aircraft slows to the base speed with flap 20 in the last 1.5 km.
-3. **Final:** flies the normal final and landing. With the engine out, it hands over to the glide planner after recovery. If the aircraft is far too high, it glides to the field first and orbits down beside it (30° bank, centred 700 m abeam the runway's middle on the aircraft's side).
+3. **Final:** flies the normal final and landing. With the engine out, it hands over to the glide planner after recovery. If the aircraft is far too high, the plan spends the height: gentler turns, then a stretched path joining further out on the extended centreline.
 
 **Touchdown accuracy.** Every runway landing now scores 100 points on the target touchdown point, minus 1 point per 3 m of miss in either direction. It is reported per suite as an average and counts in the autotune closeness term. The target is:
 - normal circuits: the aim point plus the planned float
@@ -448,7 +448,7 @@ The view is a perspective renderer drawn on the 2D canvas, so there is no depend
 | Turn onto final | n | Median | 90% | Worst |
 |---|---|---|---|---|
 | Normal circuits | 22 | 12 m | 22 m | 27 m |
-| Power-off returns | 36 | 38 m | 52 m | 90 m |
+| Power-off returns | 34 | 1 m | 15 m | 31 m |
 | Powered rejoins from a random state | 30 | 5 m | 24 m | 77 m |
 
 **Circuit turns started earlier (23 Oct, later).** The worst normal-circuit overshoots were all a tailwind on base, on the High circuit's 1,000 m base: the aircraft started the base turn at 90 kt, the tailwind carried it through the final, and it ended up to 80 m beyond the centreline. Three changes:
@@ -487,6 +487,22 @@ Two causes, both seen in the traces:
 
 Ranking a 300 m lined-up final above the second half of the height reserve made little difference to the line-up (median 425 m), and cost some landings (Monte Carlo power-off 37% → 35%), so it was dropped.
 
+**No orbits: the plan spends the height (23 Oct, evening).** The orbit beside the field is gone. A high aircraft now follows a plan that uses its height:
+1. **Gentler turns.** The planner tries 30°, then 37.5°, before the tuned 45°. It takes the gentlest that still reaches with the full reserve. A gentler turn spends more height on longer arcs. It also leaves bank in hand below the stall-margin limit, so the follower can tighten a turn that runs wide, the one onto final above all. That was the cause of the power-off overshoot: at 45° the turn was flown right at the limit, and a small speed sag held the bank below plan.
+2. **A stretched path.** Joins are searched out to 6 km on the extended centreline (200 m steps beyond 1.2 km). They rank after the predicted touchdown in 30 m steps, and the least stretch wins among equals, so the path goes further out only when flap couldn't burn the height on final.
+
+| Measure | Before | After |
+|---|---|---|
+| Power-off turn overshoot, median / worst | 38 m / 79 m | 1 m / 31 m |
+| Lined-up final before touchdown, median: power-off returns | 399 m | 645 m |
+| Lined-up final before touchdown, median: random engine-out starts | 799 m | 2,107 m |
+| Random engine-out starts landed | 57/100 | 69/100 |
+| Random engine-out touchdown accuracy | 22 | 48 |
+| Monte Carlo engine failures | 37% | 38% |
+| `engine` suite | 21/60 | 22/60 |
+
+The cost: some stretched paths go out to 4–5 km before turning back on a long final, always on a plan that reaches with the reserve.
+
 **Take-off flap** is 10°, retracted at 300 ft (seen in the traces as `fl10`).
 
 ## Results
@@ -497,11 +513,11 @@ With the scoring from the 23 Oct review: every landing is scored on touchdown sp
 |---|---|---|
 | `scenarios`: 14 cases × 2 circuits | 22/28 | 81 |
 | `stol`: 4 winds × 2 seeds per strip | 20/24 | |
-| `engine`: 60 cases | 21/60; 20/33 within the physical ceiling | |
+| `engine`: 60 cases | 22/60; 21/33 within the physical ceiling | |
 | `montecarlo 400`, normal circuits | 83% | 84 |
-| `montecarlo 400`, engine failures | 37%; 76/113 (67%) within the ceiling | 24 |
+| `montecarlo 400`, engine failures | 38%; 77/113 (68%) within the ceiling | 28 |
 | `randomland 100`, engine running | 85/100 (upsets 48/56) | 83 |
-| `randomland 100`, engine out | 57/100 | 22 |
+| `randomland 100`, engine out | 69/100 | 48 |
 | `xw_sweep` (crosswind-leg failures) | 8/71 | |
 
 The stall-margin bank limit costs some glide-back reach. Before it was added, the results were engine 25/60, Monte Carlo engine failures 36%, and xw_sweep 14/71. The limit is kept because a turn at 45° bank and best-glide speed has only about 1.1× the stall margin.

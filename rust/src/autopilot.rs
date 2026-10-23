@@ -185,6 +185,8 @@ const VFE_10: f64 = 110.0;
 const VFE_FULL: f64 = 85.0;
 /// Bank limit: airspeed over the stall speed at the turn's load factor.
 const BANK_STALL_MARGIN: f64 = 1.2;
+/// Gentler power-off turn banks tried before the tuned one (°), gentlest first.
+const EO_GENTLE_BANKS: [f64; 2] = [30.0, 37.5];
 /// Steepest bank for closing a circuit turn onto its leg when the wind or the speed widens it (the turn
 /// is planned at the circuit's 25°).
 const TURN_BANK_MAX: f64 = 30.0 * D2R;
@@ -220,14 +222,6 @@ const LINE_CAPTURE_K: f64 = 0.8;
 /// up to `PLAN_KEEP`), m: re-planning mid-turn costs height, so only for a clear gain.
 const SWITCH_GAIN: f64 = 20.0;
 const PLAN_KEEP: f64 = 60.0;
-/// Power-off orbit down: when the plan has more than `LOITER_ENTER` m of height to spare, the aircraft
-/// glides to a point beside the field (`HIGH_KEY_OFFSET` m abeam the runway's middle, on its own side) and
-/// orbits there at `LOITER_BANK`° until the surplus is under `LOITER_EXIT`. Spare height is spent where a
-/// landing on either end stays in easy reach, never out where it was when the engine stopped.
-const HIGH_KEY_OFFSET: f64 = 700.0;
-const LOITER_ENTER: f64 = 150.0;
-const LOITER_EXIT: f64 = 70.0;
-const LOITER_BANK: f64 = 30.0;
 /// Power-off turns are flown at this multiple of the planned turn speed (1: as planned).
 const TURN_SPEED_FLY: f64 = 1.0;
 /// Distance before a power-off turn at which the glide speed goes up to the turn's speed, m.
@@ -266,6 +260,8 @@ const LADDER: [(f64, bool); 5] = [(0.0, false), (10.0, false), (20.0, false), (2
 /// was made (the air-mass frame drifts with that wind from then on), and the plan it serves.
 #[derive(Clone, Debug)]
 struct EoPath {
+    /// Bank the path was planned at.
+    bank: f64,
     follow: Follower,
     t0: f64,
     wind: Vec2,
@@ -300,11 +296,6 @@ pub struct Autopilot {
     drag: usize,
     /// The power-off path being followed (air-mass frame), when gliding to a final fix.
     eo_path: Option<EoPath>,
-    /// Orbiting down over the field to lose surplus height before the power-off path (+1 left, 0 = not).
-    loiter: f64,
-    /// The orbit's centre, and whether the aircraft is still gliding to it.
-    loiter_centre: [f64; 2],
-    loiter_transit: bool,
     /// Started from a random state with the engine out: the engine-failure decision waits for the
     /// recovery to finish.
     pending_engine_out: bool,
@@ -367,9 +358,6 @@ impl Autopilot {
             eo_flaps: 0.0,
             drag: 0,
             eo_path: None,
-            loiter: 0.0,
-            loiter_centre: [0.0, 0.0],
-            loiter_transit: false,
             pending_engine_out: false,
             recovered_for: 0.0,
             rejoin: None,
@@ -435,6 +423,35 @@ impl Autopilot {
     /// otherwise glide to whichever runway direction the planner reaches with margin; lined up on final,
     /// go for the runway whatever the margin (landing ahead points the same way); else land ahead.
     /// `wind` is only passed on to the estimator's frame: decisions use the estimated mean wind.
+    /// Power-off plan at the bank that suits the height: the gentlest of `EO_GENTLE_BANKS` whose plan
+    /// still reaches with the full reserve, else the tuned (steepest) bank. A gentler turn spends more
+    /// height (longer arcs), which a high arrival has to spare, and leaves bank in hand below the
+    /// stall-margin limit, so the turns, the one onto final above all, can be tightened when they run
+    /// wide. Returns the plan and its bank; the planner is left at the bank it was at.
+    fn eo_plan(&mut self, ac: &Aircraft, w: Vec2, prefer: Option<&RunwayEnd>) -> (GlideAssessment, f64) {
+        let saved = self.planner.spec.turn_bank;
+        let steep = self.tune.eo_turn_bank * D2R;
+        let mut out = None;
+        for b in EO_GENTLE_BANKS {
+            let b = b * D2R;
+            if b >= steep - 1e-6 {
+                continue;
+            }
+            self.planner.spec.turn_bank = b;
+            let p = self.planner.plan(ac, w, prefer);
+            if p.reachable && p.surplus >= self.planner.spec.reserve * p.required {
+                out = Some((p, b));
+                break;
+            }
+        }
+        let out = out.unwrap_or_else(|| {
+            self.planner.spec.turn_bank = steep;
+            (self.planner.plan(ac, w, prefer), steep)
+        });
+        self.planner.spec.turn_bank = saved;
+        out
+    }
+
     pub fn fail_engine(&mut self, ac: &Aircraft, _wind: &Wind) -> bool {
         if self.engine_out.is_some() || self.phase == Phase::Stopped || self.phase == Phase::Rollout {
             return false;
@@ -445,7 +462,14 @@ impl Autopilot {
         self.go_around_requested = false;
         let track = ac.track(wind);
         let on_final = self.on_final_end(ac, wind, false);
-        self.glide = if ac.on_ground { None } else { Some(self.planner.plan(ac, w, None)) };
+        self.planner.spec.turn_bank = self.tune.eo_turn_bank * D2R;
+        self.glide = if ac.on_ground {
+            None
+        } else {
+            let (p, b) = self.eo_plan(ac, w, None);
+            self.planner.spec.turn_bank = b;
+            Some(p)
+        };
         let min_tb = self.planner.spec.min_turnback_height;
         let (plan, why) = if ac.on_ground {
             (EngineOutPlan::Reject, "On the runway: reject take-off".to_string())
@@ -458,6 +482,7 @@ impl Autopilot {
             let how = if g.aim < self.planner.spec.aim_point - 1.0 { format!(", aiming {} m in", g.aim.round()) } else { String::new() };
             (EngineOutPlan::Return, format!("Runway {} within glide range{how}", g.end.name))
         } else if let Some(e) = on_final {
+            self.planner.spec.turn_bank = self.tune.eo_turn_bank * D2R;
             self.glide = Some(self.planner.plan_for(ac, w, &e));
             (EngineOutPlan::Return, format!("On final: straight ahead for runway {}, flap up to stretch", e.name))
         } else {
@@ -472,7 +497,6 @@ impl Autopilot {
         self.eo_flaps = 0.0;
         self.drag = 0;
         self.eo_path = None;
-        self.loiter = 0.0;
         self.last_assess = self.t;
         match plan {
             EngineOutPlan::Reject => self.set_phase(ac, Phase::Rejected),
@@ -554,7 +578,7 @@ impl Autopilot {
             d += 250.0;
         }
         let (path, _) = self.rejoin_path(ac, wind, pick);
-        self.rejoin = Some(EoPath { follow: Follower::new(path), t0: self.t, wind: wind.v, end: "09", fix: pick });
+        self.rejoin = Some(EoPath { bank: REJOIN_BANK * D2R, follow: Follower::new(path), t0: self.t, wind: wind.v, end: "09", fix: pick });
         self.rejoin_fix_h = self.circuit.runway.glidepath_height(-pick);
         self.log(ac, "REJOIN", Some(format!("Final fix {:.1} km out at {} ft", pick / 1000.0, (self.rejoin_fix_h / FT).round())));
         self.phase = Phase::Rejoin;
@@ -625,7 +649,7 @@ impl Autopilot {
         if st.offset > 150.0 {
             // far off the path: make it afresh from here, same fix
             let (path, _) = self.rejoin_path(ac, wind, fix);
-            self.rejoin = Some(EoPath { follow: Follower::new(path), t0: self.t, wind: wind.v, end: "09", fix });
+            self.rejoin = Some(EoPath { bank: REJOIN_BANK * D2R, follow: Follower::new(path), t0: self.t, wind: wind.v, end: "09", fix });
         }
         c.phi = dubins::bank_command(&st, m, ac.psi, 3.0);
         let gv = ac.ground_velocity(wind);
@@ -1166,53 +1190,13 @@ impl Autopilot {
         c.thr = 0.0;
         c.flaps = self.eo_flaps;
         let bank = self.planner.spec.turn_bank;
-        // far too high close to the field: orbit down first (a path cannot burn it all)
-        if self.loiter != 0.0 {
-            let [cx, cy] = self.loiter_centre;
-            let (dx, dy) = (ac.x - cx, ac.y - cy);
-            let d = dx.hypot(dy);
-            let v = ac.v.max(20.0);
-            let r = v * v / (G * (LOITER_BANK * D2R).tan());
-            if self.loiter_transit && d < r + 100.0 {
-                self.loiter_transit = false;
-                // orbit the way the aircraft is already turning toward the centre
-                let to_c = (-dy).atan2(-dx);
-                self.loiter = if wrap_pi(to_c - ac.track(wind)) >= 0.0 { 1.0 } else { -1.0 };
-                self.log(ac, "ORBIT", Some("Beside the field: orbiting down".into()));
-            }
-            if self.loiter_transit {
-                // straight to the orbit point at best glide
-                let track = (-dy).atan2(-dx);
-                c.phi = self.guidance.bank_for(ac, wind, track, self.circuit.spec.bank_max);
-                self.fma = Fma::new("ENG OUT", "GLIDE", "TO FIELD");
-            } else {
-                // circle of radius r about the centre: tangent plus a correction toward the circle
-                let sgn = self.loiter;
-                let track = dy.atan2(dx) + sgn * (PI / 2.0 + (2.0 * (d - r) / r).atan());
-                let corr = self.guidance.bank_for(ac, wind, track, 15.0 * D2R);
-                c.phi = clamp(sgn * LOITER_BANK * D2R + corr, -(LOITER_BANK + 10.0) * D2R, (LOITER_BANK + 10.0) * D2R);
-                self.fma = Fma::new("ENG OUT", "GLIDE", "ORBIT");
-            }
-            c.theta = self.glide_pitch(ac, self.planner.turn_speed(ac, ac.shaper.phi, self.eo_flaps), dt);
-            if t - self.last_assess > 1.0 {
-                self.last_assess = t;
-                let fresh = self.planner.plan(ac, w, Some(&end));
-                if (fresh.reachable && fresh.surplus < LOITER_EXIT) || (!fresh.reachable && fresh.available < fresh.required) {
-                    self.loiter = 0.0;
-                    self.eo_path = None;
-                    self.log(ac, "REPLAN", Some(format!("Orbit done: runway {}, aiming {} m in", fresh.end.name, fresh.aim.round())));
-                    self.glide = Some(fresh);
-                }
-            }
-            return;
-        }
         let stale = match &self.eo_path {
             None => true,
-            Some(p) => p.end != end.name || (p.fix - g.ip_distance).abs() > 1.0,
+            Some(p) => p.end != end.name || (p.fix - g.ip_distance).abs() > 1.0 || (p.bank - bank).abs() > 1e-6,
         };
         if stale {
             let (path, _, _) = self.planner.path_to_fix(ac, w, &end, g.ip_distance);
-            self.eo_path = Some(EoPath { follow: Follower::new(path), t0: t, wind: w, end: end.name, fix: g.ip_distance });
+            self.eo_path = Some(EoPath { bank, follow: Follower::new(path), t0: t, wind: w, end: end.name, fix: g.ip_distance });
         }
         let m = Motion { v: ac.v, phi: ac.phi, roll: ac.shaper.rates.phi, bank };
         let ep = self.eo_path.as_mut().unwrap();
@@ -1245,28 +1229,19 @@ impl Autopilot {
             self.last_assess = t;
             // keep the plan while it works, unless a fresh one is clearly better: it reaches when this one
             // no longer does, or has `SWITCH_GAIN` more height in hand
-            if g.surplus > LOITER_ENTER {
-                let fresh = self.planner.plan(ac, w, Some(&end));
-                if fresh.surplus > LOITER_ENTER {
-                    // glide to the orbit point beside the field, on the aircraft's side of the runway
-                    let side = if ac.y >= 0.0 { 1.0 } else { -1.0 };
-                    self.loiter_centre = [0.5 * self.planner.runway.length, side * HIGH_KEY_OFFSET];
-                    self.loiter_transit = true;
-                    self.loiter = 1.0;
-                    self.log(ac, "ORBIT", Some(format!("{} m of height to lose: gliding to the field to orbit down", fresh.surplus.round())));
-                    return;
-                }
-            }
+            // (far too high, the plan is stretched: it joins further out on the extended centreline; there is
+            // no orbit, which spent the height wherever the aircraft happened to be)
             let mut keep = self.planner.assess_along(ac, w, &end, g.ip_distance, g.aim, arc_left, straight_left);
             keep.route = g.route.clone();
-            let fresh = self.planner.plan(ac, w, Some(&end));
+            let (fresh, fresh_bank) = self.eo_plan(ac, w, Some(&end));
             let switch = fresh.reachable && (!keep.reachable || fresh.surplus.min(PLAN_KEEP) > keep.surplus.min(PLAN_KEEP) + SWITCH_GAIN);
             if keep.reachable && !switch {
                 self.glide = Some(keep);
             } else if switch {
                 if fresh.end.name != end.name || (fresh.ip_distance - g.ip_distance).abs() > 1.0 {
-                    self.log(ac, "REPLAN", Some(format!("Runway {}, joining {} m {}, aiming {} m in", fresh.end.name, fresh.ip_distance.abs().round(), if fresh.ip_distance >= 0.0 { "out" } else { "in" }, fresh.aim.round())));
+                    self.log(ac, "REPLAN", Some(format!("Runway {}, joining {} m {}, aiming {} m in, {}° turns", fresh.end.name, fresh.ip_distance.abs().round(), if fresh.ip_distance >= 0.0 { "out" } else { "in" }, fresh.aim.round(), (fresh_bank / D2R).round())));
                 }
+                self.planner.spec.turn_bank = fresh_bank;
                 self.glide = Some(fresh);
             } else if keep.available >= keep.required {
                 // the margins are eaten but the path still reaches: carry on
@@ -1344,9 +1319,10 @@ impl Autopilot {
         // far too high even with the most drag: back to planning, which finds a longer path to a fix
         let most = LADDER.iter().filter(|l| allowed(l)).map(|l| reach(l)).fold(f64::INFINITY, f64::min);
         if ac.h > REPLAN_FLOOR * FT && d_far > 300.0 && most > d_far * (1.0 + REPLAN_LONG) {
-            let fresh = self.planner.plan(ac, w, Some(&end));
+            let (fresh, fresh_bank) = self.eo_plan(ac, w, Some(&end));
             if fresh.reachable && fresh.ip_distance > self.planner.to_point(ac.x, 0.0, &end) {
                 self.log(ac, "EXTEND", Some("High on final: a longer path".into()));
+                self.planner.spec.turn_bank = fresh_bank;
                 self.glide = Some(fresh);
                 self.eo_path = None;
                 self.set_phase(ac, Phase::EoGlide);
