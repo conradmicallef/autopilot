@@ -239,7 +239,7 @@ fn frame(s: &Simulation, cursor: usize) -> String {
     j.k("newTrack").arr();
     for q in &s.track[cursor.min(s.track.len())..] {
         j.obj().k("t").num(q.t).k("x").num(q.x).k("y").num(q.y).k("h").num(q.h).k("V").num(q.v).k("phase").str(q.phase);
-        j.k("reach").opt_bool(q.reach).end_obj();
+        j.k("reach").opt_bool(q.reach).k("flap").num(q.flap).k("beta").num(q.beta).end_obj();
     }
     j.end_arr();
 

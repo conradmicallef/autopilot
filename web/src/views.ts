@@ -154,20 +154,28 @@ export class PlanView {
   }
 }
 
-/** Altitude and airspeed against time, with phase bands. */
+/** Altitude, airspeed, and flap with sideslip, against time, with phase bands. */
 export class ProfileView {
   constructor(private cv: HTMLCanvasElement, private pal: Palette) {}
 
   draw(sim: Frame, track: TrackPoint[]): void {
     const { ctx, w, h } = fitCanvas(this.cv), P = this.pal;
     ctx.clearRect(0, 0, w, h);
-    const L = 46, R = 12, T0 = 12, gap = 26, ph = (h - T0 - 28 - gap) / 2;
+    const L = 46, R = 12, T0 = 12, gap = 26, ph = (h - T0 - 28 - 2 * gap) / 3;
     const Tmax = Math.max(360, Math.ceil((sim.t + 20) / 60) * 60);
     const X = (t: number) => L + (t / Tmax) * (w - L - R);
     const fMono = P.get('--f-mono'), fDisp = P.get('--f-display');
-    const panels = [
-      { top: T0, max: 1200, ticks: [0, 400, 800, 1200], val: (p: { h: number }) => p.h / FT, label: 'ALT (ft)', color: P.get('--ink') },
-      { top: T0 + ph + gap, max: 100, ticks: [0, 25, 50, 75, 100], val: (p: { V: number }) => p.V / KT, label: 'IAS (kt)', color: P.get('--route') }
+    type Series = { val: (p: TrackPoint) => number; label: string; color: string; step?: boolean };
+    const panels: { top: number; min: number; max: number; ticks: number[]; series: Series[] }[] = [
+      { top: T0, min: 0, max: 1200, ticks: [0, 400, 800, 1200], series: [{ val: p => p.h / FT, label: 'ALT (ft)', color: P.get('--ink') }] },
+      { top: T0 + ph + gap, min: 0, max: 100, ticks: [0, 25, 50, 75, 100], series: [{ val: p => p.V / KT, label: 'IAS (kt)', color: P.get('--route') }] },
+      {
+        top: T0 + 2 * (ph + gap), min: -15, max: 30, ticks: [-15, 0, 15, 30],
+        series: [
+          { val: p => p.flap, label: 'FLAP (°)', color: P.get('--ph-base'), step: true },
+          { val: p => (p.beta * 180) / Math.PI, label: 'SIDESLIP (°)', color: P.get('--ph-eo') }
+        ]
+      }
     ];
     // only phase changes make bands; marker events (descent, engine failure, stretch…) are not phases
     const ev = sim.events.filter(e => e.phase in PHASES);
@@ -178,16 +186,20 @@ export class ProfileView {
       ctx.globalAlpha = 1; ctx.fillRect(X(e.t), panels[0].top - 6, Math.max(1, X(t1) - X(e.t)), 3);
     });
     for (const p of panels) {
-      const Y = (v: number) => p.top + ph - (v / p.max) * ph;
+      const Y = (v: number) => p.top + ph - ((Math.max(p.min, Math.min(p.max * 1.02, v)) - p.min) / (p.max - p.min)) * ph;
       ctx.strokeStyle = P.get('--line'); ctx.lineWidth = 1; ctx.fillStyle = P.get('--muted'); ctx.textAlign = 'right';
       ctx.font = `500 10.5px ${fMono}`;
       for (const t of p.ticks) { ctx.beginPath(); ctx.moveTo(L, Y(t) + 0.5); ctx.lineTo(w - R, Y(t) + 0.5); ctx.stroke(); ctx.fillText(String(t), L - 6, Y(t) + 3.5); }
-      ctx.textAlign = 'left'; ctx.fillStyle = p.color; ctx.font = `600 11px ${fDisp}`; ctx.fillText(p.label, L + 4, p.top + 11);
-      ctx.strokeStyle = p.color; ctx.lineWidth = 2; ctx.beginPath();
-      track.forEach((q, i) => { const x = X(q.t), y = Y(Math.min(p.max * 1.02, p.val(q))); i ? ctx.lineTo(x, y) : ctx.moveTo(x, y); });
-      ctx.stroke();
-      const last = track[track.length - 1];
-      if (last) { ctx.fillStyle = p.color; ctx.beginPath(); ctx.arc(X(last.t), Y(Math.min(p.max, p.val(last))), 3.5, 0, 7); ctx.fill(); }
+      let lx = L + 4;
+      for (const sr of p.series) {
+        ctx.textAlign = 'left'; ctx.fillStyle = sr.color; ctx.font = `600 11px ${fDisp}`; ctx.fillText(sr.label, lx, p.top + 11);
+        lx += ctx.measureText(sr.label).width + 14;
+        ctx.strokeStyle = sr.color; ctx.lineWidth = 2; ctx.beginPath();
+        track.forEach((q, i) => { const x = X(q.t), y = Y(sr.val(q)); i ? ctx.lineTo(x, y) : ctx.moveTo(x, y); });
+        ctx.stroke();
+        const last = track[track.length - 1];
+        if (last) { ctx.fillStyle = sr.color; ctx.beginPath(); ctx.arc(X(last.t), Y(sr.val(last)), 3.5, 0, 7); ctx.fill(); }
+      }
     }
     // glide-reach strip under the altitude panel: green while a power-off return would make the runway
     const sy = panels[0].top + ph + 5;

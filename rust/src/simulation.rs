@@ -20,6 +20,10 @@ pub struct TrackPoint {
     pub v: f64,
     pub phase: &'static str,
     pub reach: Option<bool>,
+    /// Flap position, degrees.
+    pub flap: f64,
+    /// Sideslip, rad (+ = nose left of the air path).
+    pub beta: f64,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -413,6 +417,8 @@ impl Simulation {
                 v: ac.v,
                 phase: self.phase().code(),
                 reach: self.runway_reachable,
+                flap: ac.flap_pos,
+                beta: ac.beta,
             });
             self.next_record = self.t + 0.25;
         }

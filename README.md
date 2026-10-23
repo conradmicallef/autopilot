@@ -522,6 +522,35 @@ Four changes:
 | `xw_sweep` | 8/71 | 14/71 |
 | Power-off touchdown accuracy | 28 | 65 |
 
+**Less high on power-off finals, flap limits, flap and sideslip on the chart (23 Oct, night).**
+- **Flap run time.** The final's touchdown prediction now counts the 10 s the flap takes to run, plus 3 s to settle, at the glide actually measured. Before, a selection of full flap at 300 ft landed about 90 m past where it was predicted to.
+- **Tapered reserve.** The plan's height reserve is kept in full above 1,000 ft and tapers to a quarter of it lower down. Close in, the final's flap covers what the reserve was for, and a reserve held to the end only arrives as height to burn.
+- **Slip threshold.** The slip is used when full flap would still land more than 100 m past the target, down from 150 m.
+- **Flap limits.** Flap beyond 10° is now selected only below 80 KIAS, a 5 kt margin under the 85 kt limit, because extending flap pitches the nose down and the speed rises while it runs. With flap out, the nose comes up to hold the speed below the limit. Across 148 flights of every suite (`examples/flap_limits.rs`), 4 flights went over 85 kt with flap beyond 10°, for 0.8 s in total, at most 2.4 kt over, with the flap at 11°. Before: 8 flights, 3.9 s.
+- **Chart.** The profile chart has a third panel with flap (°) and sideslip (°) against time.
+
+Power-off landings (`examples/slip_use.rs`, engine suite plus 60 random engine-out starts):
+
+| Measure | Before | After |
+|---|---|---|
+| Touchdown vs target, median | +147 m long | +115 m long |
+| Touchdown vs target, 90th percentile | +401 m long | +325 m long |
+| Landings that slipped | 13% | 13% |
+| Passed | 82 | 85 |
+
+Other suites:
+
+| Suite | Before | After |
+|---|---|---|
+| `engine` | 26/60 | 27/60 |
+| Random engine-out starts | 67/100 | 77/100 |
+| Monte Carlo engine failures | 41% | 37% |
+| `xw_sweep` | 14/71 | 12/71 |
+
+The Monte Carlo figure was 37–38% with each change undone in turn, so the earlier 41% looks like a lucky run.
+
+**Why it is still long.** The planning margins (×1.09 + 15 m) and the reserve are kept until the turn onto final. That height arrives on a final that is often under 1 km, where full flap burns only about 2 m per 100 m more than a clean glide. Landing long is the safe side. Landing on the point would need the margins spent before the final, which costs runway landings when the model is wrong.
+
 **Take-off flap** is 10°, retracted at 300 ft (seen in the traces as `fl10`).
 
 ## Results
@@ -532,12 +561,12 @@ With the scoring from the 23 Oct review: every landing is scored on touchdown sp
 |---|---|---|
 | `scenarios`: 14 cases × 2 circuits | 22/28 | 81 |
 | `stol`: 4 winds × 2 seeds per strip | 20/24 | |
-| `engine`: 60 cases | 26/60; 25/33 within the physical ceiling | |
+| `engine`: 60 cases | 27/60; 27/35 within the physical ceiling | |
 | `montecarlo 400`, normal circuits | 83% | 84 |
-| `montecarlo 400`, engine failures | 41%; 83/113 (73%) within the ceiling | 65 |
+| `montecarlo 400`, engine failures | 37%; 77/113 (68%) within the ceiling | 71 |
 | `randomland 100`, engine running | 85/100 (upsets 48/56) | 83 |
-| `randomland 100`, engine out | 67/100 | 53 |
-| `xw_sweep` (crosswind-leg failures) | 14/71 | |
+| `randomland 100`, engine out | 77/100 | 59 |
+| `xw_sweep` (crosswind-leg failures) | 12/71 | |
 
 The stall-margin bank limit costs some glide-back reach. Before it was added, the results were engine 25/60, Monte Carlo engine failures 36%, and xw_sweep 14/71. The limit is kept because a turn at 45° bank and best-glide speed has only about 1.1× the stall margin.
 

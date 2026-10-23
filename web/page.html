@@ -82,7 +82,7 @@ label.chk { display: flex; align-items: center; gap: 6px; font-size: 0.9rem; cur
 canvas { display: block; width: 100%; }
 #map { aspect-ratio: 16 / 9.5; max-width: 100%; }
 @media (max-width: 600px) { #map { aspect-ratio: 4 / 3.4; } }
-#prof { height: 260px; }
+#prof { height: 380px; }
 
 /* Instrument stack: always dark glass, like a panel */
 .glass { background: var(--glass); color: var(--glass-ink); border-radius: 10px; padding: 12px; display: flex; flex-direction: column; gap: 12px;
@@ -234,7 +234,7 @@ button.eo-btn { border-color: var(--ph-eo); color: var(--ph-eo); }
 
   <div class="lower">
     <section class="sheet">
-      <div class="sheet-head"><span class="label">Vertical profile &amp; airspeed</span><span class="hint">Altitude (ft) and IAS (kt) against time · strip: runway within glide reach</span></div>
+      <div class="sheet-head"><span class="label">Profile, airspeed, flap &amp; sideslip</span><span class="hint">Altitude (ft), IAS (kt), flap and sideslip (°) against time · strip: runway within glide reach</span></div>
       <canvas id="prof"></canvas>
     </section>
     <div style="display:flex;flex-direction:column;gap:14px;min-width:0">

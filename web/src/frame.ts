@@ -9,7 +9,7 @@ export const ENGINE_OUT_PHASES: Phase[] = ['REJECTED', 'EO_GLIDE', 'EO_FINAL', '
 
 export type Point = [number, number];
 
-export interface TrackPoint { t: number; x: number; y: number; h: number; V: number; phase: Phase; reach: boolean | null; }
+export interface TrackPoint { t: number; x: number; y: number; h: number; V: number; phase: Phase; reach: boolean | null; flap: number; beta: number; }
 export interface ModeEvent { t: number; phase: Phase | 'DESCENT' | 'ENGINE_FAILURE'; h: number; V: number; x: number; y: number; note?: string | null; }
 export interface Criterion { label: string; target: string; value?: string | null; pass?: boolean | null; info?: boolean; }
 export interface Touchdown { t: number; x: number; y: number; sink: number; V: number; crab: number; onRunway: boolean; }

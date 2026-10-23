@@ -256,9 +256,11 @@ const REJOIN_SLOW: f64 = 1500.0;
 /// The final picks the level whose glide lands nearest the aim point (never short of the nearest one).
 const LADDER: [(f64, bool); 5] = [(0.0, false), (10.0, false), (20.0, false), (20.0, true), (30.0, false)];
 /// The slip is used only when the most flap would still land this much past the aim point, m.
-const SLIP_NEED: f64 = 150.0;
+const SLIP_NEED: f64 = 100.0;
 /// A fresh power-off plan replaces the one flown when it lands this much nearer the nominal touchdown, m.
-const SPEND_GAIN: f64 = 80.0;
+const SPEND_GAIN: f64 = 40.0;
+/// Seconds after the flap stops for the glide to settle on its new gradient (the speed bleeds back).
+const FLAP_SETTLE: f64 = 3.0;
 
 /// A power-off path being followed: the Dubins path in the air mass, when and with which wind estimate it
 /// was made (the air-mass frame drifts with that wind from then on), and the plan it serves.
@@ -443,7 +445,7 @@ impl Autopilot {
             }
             self.planner.spec.turn_bank = b;
             let p = self.planner.plan(ac, w, prefer);
-            if p.reachable && p.surplus >= self.planner.spec.reserve * p.required {
+            if p.reachable && p.surplus >= self.planner.reserve_at(ac) * p.required {
                 out = Some((p, b));
                 break;
             }
@@ -1168,8 +1170,19 @@ impl Autopilot {
             c.phi = clamp(c.phi, -lim, lim);
         }
         // flap limits (C172P): beyond 10° only at or below 85 KIAS, any flap only at or below 110 KIAS;
-        // the command waits (a 2 kt margin) rather than let a phase put flap out too fast
-        if ac.v > (VFE_FULL - 2.0) * KT {
+        // the command waits (a 5 kt margin: extending flap pitches the nose down and the speed rises a little
+        // while it runs) rather than let a phase put flap out too fast. With the flap
+        // already out, a gust or a steep path can still carry the speed up: the nose comes up to hold it
+        // below the limit (as a pilot would) rather than the flap coming in, which would balloon and then
+        // sink; only right at the limit does the flap start in.
+        if ac.v > (VFE_FULL - 5.0) * KT {
+            c.flaps = c.flaps.min(ac.flap_pos.max(10.0));
+        }
+        let over = ac.v - (VFE_FULL - 4.0) * KT;
+        if ac.flap_pos > 10.5 && over > 0.0 && !ac.on_ground {
+            c.theta = c.theta.max(ac.theta + clamp(0.04 * over, 0.0, 6.0 * D2R));
+        }
+        if ac.v > VFE_FULL * KT {
             c.flaps = c.flaps.min(10.0);
         }
         if ac.v > (VFE_10 - 2.0) * KT {
@@ -1245,7 +1258,7 @@ impl Autopilot {
             let spends = fresh.reachable
                 && keep.reachable
                 && fresh.end.name == end.name
-                && fresh.surplus >= self.planner.spec.reserve * fresh.required
+                && fresh.surplus >= self.planner.reserve_at(ac) * fresh.required
                 && (self.planner.predicted_touchdown(ac, w, &fresh) - nom).abs() + SPEND_GAIN
                     < (self.planner.predicted_touchdown(ac, w, &keep) - nom).abs();
             let switch = fresh.reachable
@@ -1314,9 +1327,22 @@ impl Autopilot {
                 && (l.0 >= current.0 || (ac.h > RETRACT_FLOOR * FT && !l.1))
         };
         // touchdown distance ahead for a level: the glide's reach plus the hold-off float from its speed
+        // The flap takes time to run (`rates.flaps` °/s): until it is out the glide is shallower, so the
+        // distance flown while it moves is counted at the mean of the present and the new gradient
+        // (without it, a selection of full flap at 300 ft landed some 90 m past where it was predicted to).
+        let flap_rate = ac.shaper.rates.flaps.max(0.1);
         let reach = |l: &(f64, bool)| {
             let v = if l.0 >= 20.0 { self.planner.spec.vapp_eo } else { self.planner.spec.vbg };
-            ac.h / self.planner.gradient(ac, w, l.0, if l.1 { SLIP_SINK_GAIN } else { 1.0 }, &end) + self.planner.float_distance(ac, v, l.0, w, &end)
+            let g_new = self.planner.gradient(ac, w, l.0, if l.1 { SLIP_SINK_GAIN } else { 1.0 }, &end);
+            // the glide now: as measured (sink over ground speed), which also catches the float as new flap
+            // lifts the nose, bounded by the model's either side
+            let gs = (ac.v + emergency::along(w, end.heading)).max(5.0);
+            let g_model = self.planner.gradient(ac, w, ac.flap_pos, 1.0, &end);
+            let g_now = clamp(-ac.vertical_speed() / gs, 0.6 * g_model, 1.5 * g_model);
+            let t_run = (l.0 - ac.flap_pos).abs() / flap_rate + FLAP_SETTLE;
+            let d_run = (gs * t_run).min(ac.h / (0.5 * (g_now + g_new)));
+            let h_run = d_run * 0.5 * (g_now + g_new);
+            d_run + (ac.h - h_run).max(0.0) / g_new + self.planner.float_distance(ac, v, l.0, w, &end)
         };
         // flap first, as the C172 is flown: the slip only when even the most flap would still land more
         // than `SLIP_NEED` m long, and it must then do clearly better (once slipping, it carries on while

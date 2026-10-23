@@ -25,5 +25,6 @@ fn main() {
             println!("{:6.1} {:<10} x {:6.0} y {:5.0} h {:4.0} phi {:5.1} psi {:6.1} v {:4.1} 1.2Vs√n {:4.1} fl {:2.0}", s.t, format!("{:?}", s.phase()), ac.x, ac.y, ac.h / 0.3048, ac.phi.to_degrees(), ac.psi.to_degrees(), ac.v, 1.2 * vs / ac.phi.cos().sqrt(), ac.flap_pos);
         }
     }
+    if let Some(a) = s.accuracy() { println!("touchdown {:+.0} m from the target", a.0); }
     for e in &s.autopilot.events { if e.t > 0.0 { println!("  {:6.1} {:<12} x {:6.0} y {:6.0} h {:5.0} {}", e.t, e.phase, e.x, e.y, e.h / 0.3048, e.note.clone().unwrap_or_default()); } }
 }

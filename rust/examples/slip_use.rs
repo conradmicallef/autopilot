@@ -1,10 +1,11 @@
-// How often power-off approaches use the forward slip: flights that slipped, and seconds slipping.
+// How often power-off approaches use the forward slip (flights that slipped, seconds slipping), and how
+// far from the target point they touch down (+ = long).
 use circuitsim::airfield::{high_circuit, standard_circuit};
 use circuitsim::atmosphere::{Rng, WindSettings};
 use circuitsim::scenarios::*;
 use circuitsim::simulation::{AirStart, Simulation};
 use circuitsim::ModelKind;
-fn run(mut s: Simulation, fail: Option<&EoTrigger>) -> (f64, bool, bool) {
+fn run(mut s: Simulation, fail: Option<&EoTrigger>) -> (f64, bool, bool, f64) {
     let mut done = fail.is_none();
     let mut slip = 0.0;
     while !s.finished() && s.t < 1500.0 {
@@ -13,7 +14,7 @@ fn run(mut s: Simulation, fail: Option<&EoTrigger>) -> (f64, bool, bool) {
         if s.autopilot.fma.lat == "SLIP" { slip += Simulation::DT; }
     }
     let on = s.touchdown.as_ref().map(|t| t.on_runway).unwrap_or(false);
-    (slip, on, s.passed())
+    (slip, on, s.passed(), s.accuracy().map(|a| a.0).unwrap_or(f64::NAN))
 }
 fn main() {
     let m = ModelKind::SixDof;
@@ -36,5 +37,9 @@ fn main() {
     let landed: Vec<_> = res.iter().filter(|r| r.1).collect();
     let slipped = landed.iter().filter(|r| r.0 > 0.5).count();
     let secs: f64 = landed.iter().map(|r| r.0).sum();
+    let mut miss: Vec<f64> = landed.iter().map(|r| r.3).filter(|m| m.is_finite()).collect();
+    miss.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    let n = miss.len();
+    println!("touchdown vs target: 10% {:+.0} m, median {:+.0} m, 90% {:+.0} m; {} over 100 m long, {} over 100 m short", miss[n / 10], miss[n / 2], miss[n * 9 / 10], miss.iter().filter(|m| **m > 100.0).count(), miss.iter().filter(|m| **m < -100.0).count());
     println!("{} runway landings, {} slipped ({:.0}%), {:.1} s of slip per landing on average, {} passed", landed.len(), slipped, 100.0 * slipped as f64 / landed.len() as f64, secs / landed.len() as f64, res.iter().filter(|r| r.2).count());
 }

@@ -42,6 +42,8 @@ const FIX_STEP: f64 = 50.0;
 /// Furthest join for a stretched path when too high, m before the threshold, searched in this step.
 const STRETCH_MAX: f64 = 6000.0;
 const STRETCH_STEP: f64 = 200.0;
+/// Height above the runway from which the plan keeps its full reserve, m.
+const RESERVE_FULL_H: f64 = 300.0;
 const AIM_STEP: f64 = 60.0;
 /// Shortest straight final before the touchdown, m: time to settle on the centreline and flare.
 pub const MIN_FINAL: f64 = 150.0;
@@ -296,6 +298,13 @@ impl GlidePlanner {
         GlideAssessment { reachable: surplus >= 0.0, required, available, route, ip_distance: fix_d, aim, end: *end, surplus, headroom: surplus }
     }
 
+    /// Height reserve the plan keeps, as a share of the height the path needs: the full `reserve` from
+    /// `RESERVE_FULL_H` up, tapering below to a quarter of it. The reserve covers what the model can't
+    /// know over the path still to fly; close in, the final's flap does that, and a reserve held to the
+    /// end only arrives as height to burn.
+    pub fn reserve_at(&self, ac: &Aircraft) -> f64 {
+        self.spec.reserve * (ac.h / RESERVE_FULL_H).clamp(0.25, 1.0)
+    }
     /// Touchdown predicted for a plan, m past the threshold, with the drag the final can add: height
     /// beyond what full flap burns over the final is flown off long.
     pub fn predicted_touchdown(&self, ac: &Aircraft, wind: Vec2, a: &GlideAssessment) -> f64 {
@@ -340,7 +349,7 @@ impl GlidePlanner {
         // ranking, lowest first: height in hand up to the reserve; then the touchdown nearest the nominal
         // aim point, predicted with the drag the final can add: height beyond what full flap burns over
         // the final is flown off long (so a high arrival prefers the longer final); then the longest final
-        let reserve = self.spec.reserve;
+        let reserve = self.reserve_at(ac);
         let predicted = |a: &GlideAssessment| self.predicted_touchdown(ac, wind, a);
         // A join beyond `fix_max` stretches the path (out along the extended centreline, then back on a long
         // final) to spend height that flap can't burn; it ranks after the touchdown (in 30 m steps, so a
