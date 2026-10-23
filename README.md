@@ -503,6 +503,25 @@ Ranking a 300 m lined-up final above the second half of the height reserve made 
 
 The cost: some stretched paths go out to 4–5 km before turning back on a long final, always on a plan that reaches with the reserve.
 
+**Flap first, slip last (23 Oct, evening).** Power-off finals slipped on 98% of landings, about 40 s each (`examples/slip_use.rs`). Two causes:
+- **The target point.** The final steered its drag to land on the plan's aim point, and that was usually the runway's first 60 m. The planner aims short to make up for height it expects to burn, and with that target even full flap landed long, so the slip came out.
+- **The plan's spare height.** The margins and the 20% reserve are kept all the way down, and they arrive on a short final where flap alone can't burn them.
+
+Four changes:
+1. **Nominal target.** The final steers to the nominal touchdown point, or the plan's aim if that is further.
+2. **Slip only when far too high.** The slip is used only when full flap would still land more than 150 m past that point, and it must do clearly better. It never retracts flap to slip.
+3. **Spare height spent on the way.** A fresh plan replaces the one being flown when it keeps the full reserve and lands at least 80 m nearer the nominal touchdown. The reserve is a share of what is still to fly, so the spare height is spent on the path as the aircraft closes in.
+4. **Accuracy scored against the real target.** Power-off touchdown accuracy is now scored against the point the final aims for.
+
+| Measure | Before | After |
+|---|---|---|
+| Power-off landings that slipped | 98% | 13% |
+| Slip time per landing | 40 s | 2.5 s |
+| Monte Carlo engine failures | 38% | 41% (73% within the ceiling) |
+| `engine` suite | 22/60 | 26/60 |
+| `xw_sweep` | 8/71 | 14/71 |
+| Power-off touchdown accuracy | 28 | 65 |
+
 **Take-off flap** is 10°, retracted at 300 ft (seen in the traces as `fl10`).
 
 ## Results
@@ -513,12 +532,12 @@ With the scoring from the 23 Oct review: every landing is scored on touchdown sp
 |---|---|---|
 | `scenarios`: 14 cases × 2 circuits | 22/28 | 81 |
 | `stol`: 4 winds × 2 seeds per strip | 20/24 | |
-| `engine`: 60 cases | 22/60; 21/33 within the physical ceiling | |
+| `engine`: 60 cases | 26/60; 25/33 within the physical ceiling | |
 | `montecarlo 400`, normal circuits | 83% | 84 |
-| `montecarlo 400`, engine failures | 38%; 77/113 (68%) within the ceiling | 28 |
+| `montecarlo 400`, engine failures | 41%; 83/113 (73%) within the ceiling | 65 |
 | `randomland 100`, engine running | 85/100 (upsets 48/56) | 83 |
-| `randomland 100`, engine out | 69/100 | 48 |
-| `xw_sweep` (crosswind-leg failures) | 8/71 | |
+| `randomland 100`, engine out | 67/100 | 53 |
+| `xw_sweep` (crosswind-leg failures) | 14/71 | |
 
 The stall-margin bank limit costs some glide-back reach. Before it was added, the results were engine 25/60, Monte Carlo engine failures 36%, and xw_sweep 14/71. The limit is kept because a turn at 45° bank and best-glide speed has only about 1.1× the stall margin.
 

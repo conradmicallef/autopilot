@@ -296,6 +296,21 @@ impl GlidePlanner {
         GlideAssessment { reachable: surplus >= 0.0, required, available, route, ip_distance: fix_d, aim, end: *end, surplus, headroom: surplus }
     }
 
+    /// Touchdown predicted for a plan, m past the threshold, with the drag the final can add: height
+    /// beyond what full flap burns over the final is flown off long.
+    pub fn predicted_touchdown(&self, ac: &Aircraft, wind: Vec2, a: &GlideAssessment) -> f64 {
+        let end = &a.end;
+        let (g_clean, g_full) = (self.gradient(ac, wind, 0.0, 1.0, end), self.gradient(ac, wind, 30.0, 1.0, end));
+        let fin = self.glide_final(ac, wind, end, a.ip_distance, a.aim);
+        let burnable = fin * (g_full - g_clean).max(0.0);
+        let excess = (a.available - a.required - burnable).max(0.0);
+        a.aim + excess / g_full
+    }
+    /// The nominal touchdown aim for a runway end in this wind, m past the threshold.
+    pub fn nominal_aim(&self, wind: Vec2, end: &RunwayEnd) -> f64 {
+        self.spec.aim_point.min(self.far_aim(wind, end))
+    }
+
     /// Best option for one runway direction. The path may join the centreline anywhere from `fix_max`
     /// before the threshold to over the runway itself (any part of it will do), with at least
     /// `MIN_FINAL` of straight final before the touchdown, which may be anywhere from `aim_min` past the
@@ -326,13 +341,7 @@ impl GlidePlanner {
         // aim point, predicted with the drag the final can add: height beyond what full flap burns over
         // the final is flown off long (so a high arrival prefers the longer final); then the longest final
         let reserve = self.spec.reserve;
-        let (g_clean, g_full) = (self.gradient(ac, wind, 0.0, 1.0, end), self.gradient(ac, wind, 30.0, 1.0, end));
-        let predicted = |a: &GlideAssessment| {
-            let fin = self.glide_final(ac, wind, end, a.ip_distance, a.aim);
-            let burnable = fin * (g_full - g_clean).max(0.0);
-            let excess = (a.available - a.required - burnable).max(0.0);
-            a.aim + excess / g_full
-        };
+        let predicted = |a: &GlideAssessment| self.predicted_touchdown(ac, wind, a);
         // A join beyond `fix_max` stretches the path (out along the extended centreline, then back on a long
         // final) to spend height that flap can't burn; it ranks after the touchdown (in 30 m steps, so a
         // stretch is taken only for a real gain), and the least stretch wins among equals.

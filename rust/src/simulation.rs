@@ -595,7 +595,10 @@ impl Simulation {
     pub fn touchdown_target(&self) -> Option<(f64, crate::emergency::RunwayEnd)> {
         let ap = &self.autopilot;
         match &ap.engine_out {
-            Some(eo) if eo.plan == EngineOutPlan::Return => ap.glide.as_ref().map(|g| (g.aim, g.end)),
+            // what the power-off final steers its drag for: the nominal touchdown, or the plan's aim if further
+            Some(eo) if eo.plan == EngineOutPlan::Return => {
+                ap.glide.as_ref().map(|g| (g.aim.max(ap.planner.nominal_aim(self.steady_wind(), &g.end)), g.end))
+            }
             Some(_) => None,
             None => {
                 let end = ap.planner.ends[0];

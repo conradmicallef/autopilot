@@ -255,6 +255,10 @@ const REJOIN_SLOW: f64 = 1500.0;
 /// The power-off drag ladder: flap settings, then a forward slip at flap 20, in order of glide gradient.
 /// The final picks the level whose glide lands nearest the aim point (never short of the nearest one).
 const LADDER: [(f64, bool); 5] = [(0.0, false), (10.0, false), (20.0, false), (20.0, true), (30.0, false)];
+/// The slip is used only when the most flap would still land this much past the aim point, m.
+const SLIP_NEED: f64 = 150.0;
+/// A fresh power-off plan replaces the one flown when it lands this much nearer the nominal touchdown, m.
+const SPEND_GAIN: f64 = 80.0;
 
 /// A power-off path being followed: the Dubins path in the air mass, when and with which wind estimate it
 /// was made (the air-mass frame drifts with that wind from then on), and the plan it serves.
@@ -1234,7 +1238,18 @@ impl Autopilot {
             let mut keep = self.planner.assess_along(ac, w, &end, g.ip_distance, g.aim, arc_left, straight_left);
             keep.route = g.route.clone();
             let (fresh, fresh_bank) = self.eo_plan(ac, w, Some(&end));
-            let switch = fresh.reachable && (!keep.reachable || fresh.surplus.min(PLAN_KEEP) > keep.surplus.min(PLAN_KEEP) + SWITCH_GAIN);
+            // ... or it keeps the full reserve and lands clearly nearer the nominal touchdown: the height a
+            // plan carries beyond its reserve is spent on the path as the aircraft gets closer (the reserve
+            // is a share of what is still to fly), not left to a long slip on final
+            let nom = self.planner.nominal_aim(w, &end);
+            let spends = fresh.reachable
+                && keep.reachable
+                && fresh.end.name == end.name
+                && fresh.surplus >= self.planner.spec.reserve * fresh.required
+                && (self.planner.predicted_touchdown(ac, w, &fresh) - nom).abs() + SPEND_GAIN
+                    < (self.planner.predicted_touchdown(ac, w, &keep) - nom).abs();
+            let switch = fresh.reachable
+                && (!keep.reachable || spends || fresh.surplus.min(PLAN_KEEP) > keep.surplus.min(PLAN_KEEP) + SWITCH_GAIN);
             if keep.reachable && !switch {
                 self.glide = Some(keep);
             } else if switch {
@@ -1287,29 +1302,44 @@ impl Autopilot {
         let far = self.planner.far_aim(w, &end).max(g.aim);
         let (d_near, d_nom, d_far) = (
             self.planner.to_point(ac.x, self.planner.spec.aim_min, &end),
-            self.planner.to_point(ac.x, g.aim, &end),
+            // the nominal touchdown, or the plan's if that is further: a plan that aims short to make up for
+            // height it expects to burn is not a reason to slip down onto the runway's first metres
+            self.planner.to_point(ac.x, g.aim.max(self.planner.nominal_aim(w, &end)), &end),
             self.planner.to_point(ac.x, far, &end),
         );
         let current = LADDER[self.drag];
         let allowed = |l: &(f64, bool)| {
             (l.0 <= 10.0 || lined_up || low)
                 && (!l.1 || (aligned && ac.h > SLIP_FLOOR * FT))
-                && (l.0 >= current.0 || ac.h > RETRACT_FLOOR * FT)
+                && (l.0 >= current.0 || (ac.h > RETRACT_FLOOR * FT && !l.1))
         };
         // touchdown distance ahead for a level: the glide's reach plus the hold-off float from its speed
         let reach = |l: &(f64, bool)| {
             let v = if l.0 >= 20.0 { self.planner.spec.vapp_eo } else { self.planner.spec.vbg };
             ac.h / self.planner.gradient(ac, w, l.0, if l.1 { SLIP_SINK_GAIN } else { 1.0 }, &end) + self.planner.float_distance(ac, v, l.0, w, &end)
         };
+        // flap first, as the C172 is flown: the slip only when even the most flap would still land more
+        // than `SLIP_NEED` m long, and it must then do clearly better (once slipping, it carries on while
+        // it does better at all)
         let mut best: Option<(usize, f64)> = None;
+        let mut best_slip: Option<(usize, f64)> = None;
         for (i, l) in LADDER.iter().enumerate() {
             if !allowed(l) || reach(l) < d_near {
                 continue;
             }
             // a small preference for staying put, so the level does not flicker between two
             let err = (reach(l) - d_nom).abs() * if i == self.drag { 0.9 } else { 1.0 };
-            if best.map_or(true, |b| err < b.1) {
-                best = Some((i, err));
+            let slot = if l.1 { &mut best_slip } else { &mut best };
+            if slot.map_or(true, |b| err < b.1) {
+                *slot = Some((i, err));
+            }
+        }
+        if let Some(sl) = best_slip {
+            let slipping = LADDER[self.drag].1;
+            let flap_err = best.map_or(f64::INFINITY, |b| b.1);
+            let long = best.map_or(true, |b| reach(&LADDER[b.0]) > d_nom);
+            if long && flap_err > SLIP_NEED && (sl.1 < flap_err - 0.5 * SLIP_NEED || (slipping && sl.1 < flap_err)) {
+                best = Some(sl);
             }
         }
         let lowest = LADDER.iter().position(|l| allowed(l)).unwrap_or(self.drag);
