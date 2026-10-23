@@ -18,7 +18,6 @@ The page runs the Rust core only. If WebAssembly can't start, it shows an error 
 | `rust/src/sixdof/` | 6DOF model (`mod.rs`), its control laws (`fcs.rs`), and trim and natural-mode analysis (`analysis.rs`, native only) |
 | `rust/src/wasm.rs` | C-ABI exports for the browser: one simulation in module memory, read as a JSON frame each animation frame |
 | `web/` | Browser UI in TypeScript; `build.sh` produces the single-file page with the WASM base64-embedded |
-| `ts/` | The original TypeScript core, kept as a reference implementation for parity checks (no longer in the page) |
 
 ### Rust modules
 
@@ -596,7 +595,7 @@ The Monte Carlo runs use winds of 0–15 kt from any direction, 40% of them gust
 Earlier results (strong-wind power-off sweep, the pre-review failure analysis) are in the dated sections above. They used the old planner and the old scoring.
 
 **Parity checks:**
-- The first Rust port matched the TypeScript core on all 88 cases (normal and engine failure, both circuits), to printed precision: `ts/test/parity.ts` against `circuitsim parity`. The autopilot changes above came afterwards.
+- The first Rust port matched the original TypeScript core (since removed; it is in the git history) on all 88 cases (normal and engine failure, both circuits), to printed precision: `ts/test/parity.ts` against `circuitsim parity`. The autopilot changes above came afterwards.
 - The WASM build gives results identical to the native build.
 - A full 6DOF flight computes in about 0.1 s in WASM.
 

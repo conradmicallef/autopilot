@@ -3,12 +3,12 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 ( cd ../rust && RUSTC_BOOTSTRAP=1 cargo build --profile wasm --lib --target wasm32-unknown-unknown -Zbuild-std=std,panic_abort -q )
-[ -x node_modules/.bin/wasm-opt ] || npm i -s binaryen@119.0.0
+[ -x node_modules/.bin/wasm-opt ] && [ -x node_modules/.bin/esbuild ] || npm i -s
 mkdir -p dist
 node_modules/.bin/wasm-opt -Oz --enable-bulk-memory --enable-nontrapping-float-to-int --enable-sign-ext --enable-mutable-globals \
   ../rust/target/wasm32-unknown-unknown/wasm/circuitsim.wasm -o dist/circuitsim.wasm
-../ts/node_modules/.bin/tsc -p .
-../ts/node_modules/.bin/esbuild src/main.ts --bundle --format=iife --target=es2020 --minify --outfile=dist/ui.js --log-level=warning
+node_modules/.bin/tsc -p .
+node_modules/.bin/esbuild src/main.ts --bundle --format=iife --target=es2020 --minify --outfile=dist/ui.js --log-level=warning
 python3 - <<'PY'
 import base64, gzip
 page = open('page.html').read()
