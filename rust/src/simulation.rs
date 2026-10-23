@@ -44,6 +44,8 @@ pub struct Touchdown {
     pub xwind: f64,
     /// Stall speed for the flap set, m/s.
     pub vs: f64,
+    /// Gusts were on.
+    pub gusty: bool,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -135,11 +137,13 @@ pub struct Simulation {
 pub const TD_SPEED_MAX: f64 = 1.15;
 /// Lowest pitch at touchdown, deg: main wheels first, nose wheel held off.
 pub const TD_PITCH_MIN: f64 = 5.0;
+/// Extra touchdown speed allowed in gusts: half a typical gust factor, m/s (about 3.5 kt).
+pub const GUST_TD_ALLOWANCE: f64 = 1.8;
 
 fn touchdown_rows(td: &Touchdown) -> (Criterion, Criterion) {
     // in a crosswind the technique touches down faster by half the crosswind component
-    let limit = TD_SPEED_MAX * td.vs + crate::autopilot::TD_XWIND_K * td.xwind;
-    let mut sp = crit("Touchdown speed", &format!("≤ {TD_SPEED_MAX} × stall speed + ¾ crosswind"));
+    let limit = TD_SPEED_MAX * td.vs + crate::autopilot::TD_XWIND_K * td.xwind + if td.gusty { GUST_TD_ALLOWANCE } else { 0.0 };
+    let mut sp = crit("Touchdown speed", &format!("≤ {TD_SPEED_MAX} × stall speed + ¾ crosswind (+3.5 kt gusty)"));
     sp.value = Some(format!("{} kt, {} × Vs (flap {}; limit {} kt)", r0(td.v / KT), f2(td.vs_ratio), r0(td.flap), r0(limit / KT)));
     sp.pass = Some(td.v <= limit);
     let mut pt = crit("Nose-up at touchdown", &format!("≥ {TD_PITCH_MIN}° (main wheels first)"));
@@ -279,6 +283,7 @@ impl Simulation {
                     crate::emergency::across(w, ac.runway_heading).abs()
                 },
                 vs: ac.stall_speed(ac.flap_pos),
+                gusty: self.wind.settings.gusts,
             });
             self.autopilot.on_unexpected_touchdown(&self.aircraft);
         }
@@ -393,7 +398,7 @@ impl Simulation {
             crit("Touchdown point", &td_target),
             crit("Centerline error", "< 5 m"),
             crit("Nose aligned at touchdown", "< 5° crab"),
-            crit("Touchdown speed", &format!("≤ {TD_SPEED_MAX} × stall speed + ¾ crosswind")),
+            crit("Touchdown speed", &format!("≤ {TD_SPEED_MAX} × stall speed + ¾ crosswind (+3.5 kt gusty)")),
             crit("Nose-up at touchdown", &format!("≥ {TD_PITCH_MIN}° (main wheels first)")),
             crit("Stopped on runway", &format!("before {} m", r0(rwy.length))),
         ];

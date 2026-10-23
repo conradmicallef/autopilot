@@ -31,7 +31,7 @@ export const PHASES: Record<Phase, PhaseInfo & { index: number }> = Object.fromE
 
 const TOKENS = ['--paper', '--panel', '--ink', '--muted', '--line', '--route', '--runway', '--rwmark', '--ok', '--bad',
   '--f-display', '--f-mono', '--ph-eo', '--sky-top', '--sky-low', '--earth', '--grid3d', '--runway3d', '--rwmark3d', '--tree',
-  '--shadow3d', '--plane-wing', '--plane-body', '--plane-tail', '--plane-edge', '--hud3d', ...new Set([...PHASE_SEQUENCE, GO_AROUND_INFO].map(p => p.token))];
+  '--shadow3d', '--plane-wing', '--plane-body', '--plane-tail', '--plane-edge', '--hud3d', '--hud', ...new Set([...PHASE_SEQUENCE, GO_AROUND_INFO].map(p => p.token))];
 
 /** Canvas can't read CSS variables, so resolved token values are cached and refreshed on theme change. */
 export class Palette {

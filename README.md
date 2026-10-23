@@ -29,9 +29,10 @@ The page runs the Rust core only. If WebAssembly can't start, it shows an error 
 | `airfield` | Runway 09/27, Standard and High circuit specifications |
 | `c172p` | The JSBSim Cessna 172P data: lift, drag, ground-effect and derivative tables, geometry, inertia, gear, loaded CG |
 | `aircraft` | What the autopilot sees (`Aircraft`), `CommandShaper` rate limits, point-mass dynamics, dispatch to 6DOF |
-| `control` | PI controllers, track guidance, flight-path/V-S/altitude holds, auto-throttle, speed-on-pitch, gust estimator |
+| `control` | PI controllers, track guidance, flight-path/V-S/altitude holds, auto-throttle, speed-on-pitch, wind and gust estimator |
+| `dubins` | Dubins paths (turn–straight–turn) and the vector-field path follower used for power-off glides |
 | `autopilot` | Phase state machine, flight mode annunciator (FMA), stabilised-approach monitor, go-around, crosswind alignment, engine-out logic |
-| `emergency` | `GlidePlanner`: reachability of either runway direction, intercept choice, glide gradients |
+| `emergency` | `GlidePlanner`: Dubins glide paths in the air mass to either runway direction, join point and aim choice, height model from the trimmed glide, hold-off float |
 | `tuning` | `Tuning` (gains and landing parameters, with the autotuned defaults) and `Perturb` (model error for robustness tests) |
 | `autotune` | Native only: fixed flight sets, soft scoring, inner-loop margin check, CMA-ES search |
 | `simulation` | World stepping at 50 Hz, track, glide-reach bookkeeping, landing evaluation |
@@ -183,6 +184,44 @@ The tuned values are the 6DOF defaults (`Tuning::default`). The hand-tuned set i
 - Smaller gust margins, especially power-off (0.87 σ). More speed was costing float, not saving lulls.
 
 **What it didn't fix:** on the fixed suites the picture is mixed. Some suites gain a case or two and others lose one. In particular, the one gusty short-field case in `stol` now floats again, to 165 m against a 140 m window. Those suites are small and were not in the training set. The hold-out is the fairer measure.
+
+## Review and rework (23 Oct, afternoon)
+
+A Fable review (`notes/fable-review-2026-10-23.md`) checked the code against good practice, over-complicated logic and what should be physically possible. All eight of its recommendations are done:
+
+1. **Dubins glide planner and one path-following law** (`dubins.rs`, `emergency.rs`). The power-off plan is a turn–straight–turn path at the bank actually flown, solved in the air mass so the fix drifts upwind by wind × time. It joins the centreline anywhere from 1.2 km out to over the runway, and the touchdown can be anywhere from 60 m in to where a stop still fits. One height model covers it all:
+   - straight: distance ÷ L/D
+   - turn at bank φ flown at max(best glide, 1.2 × the stall speed × √n): n × arc length ÷ L/D at the 1 g equivalent speed
+   - roll-in, hold-off float and flap retraction included
+
+   Plans rank by height in hand relative to the path's need (up to the tuned `eo_reserve`), then by touchdown nearest the nominal aim point, then by the longest final. The path is followed in the air mass with a vector-field law: orbit capture on the arcs, line capture on the straight, arcs tracked by heading with a roll-out lead. Each second the energy is re-checked along what is left of that path, not on a fresh path, which would start with a new roll-in.
+
+   This deletes the base key, intercept-point corner costs, `final_turn_due`, the DIR KEY/BASE branches, S-turns and the separate margin-free "stretch". A kinematic test flies 72 start/target pairs: worst case 8.3 m off the line and 2.1° off heading.
+2. **Scoring.**
+   - Every landing now has a touchdown speed row (≤ 1.15 Vs, + ¾ of the crosswind, + 3.5 kt when gusty) and a nose-up row (≥ 5°).
+   - Glide-back returns also have the centreline and crab rows.
+   - "Stopped on runway" checks the runway area.
+   - The flare holds off just above the runway until the speed bleeds to 1.05 Vs (+ ¾ crosswind, + half the gust margin). Touchdowns are now 49 kt, 1.09 Vs, 9° nose-up, with a 173 m ground roll (POH 168 m). Before they were 58 kt, 1.29 Vs, 4°.
+   - The normal aim point moves to 150 m in so the float stays in the first third.
+3. **One energy decision on a power-off final**: a drag ladder (flap 0/10/20, slip at 20, flap 30). Of the levels allowed (flap beyond 10° once lined up or low, the slip when aligned above 100 ft, no flap raised below 100 ft), it takes the one whose glide plus float lands nearest the planned aim point, never short of the runway. When even full drag lands far beyond the farthest aim point, it plans a longer path.
+4. **Estimated wind.** The autopilot flies on a 15 s mean of GPS velocity minus airspeed along the nose heading, frozen while a sideslip is commanded. It no longer reads the simulation's wind. The state is still noise-free.
+5. **Competing mechanisms removed.**
+   - The planner's turn bank is the one flown (`eo_turn_bank`).
+   - The stretch fallback is folded into the plan's aim-point choice, so the tuned margins matter again.
+   - `VBG_HEAD_K`, `key_margin` and `stretch_margin` are gone.
+   - Every tuned value enters through one constructor: `Autopilot::with_procedure(…, Tuning)`, `EngineOutSpec::new`, `FcsGains::from_tuning`.
+   - The autopilot no longer writes to the aircraft. The glide pitch rate travels in `Commands`, and only the flap lever carries over between steps.
+   - Heights are named in feet, and `vy` is renamed `v_climb`.
+6. **Tests.** `cargo test --release --lib --test suites`. 17 unit tests: Dubins geometry, the follower, the planner, the flare law, frame conventions through `observe()`, glide table against trim. 4 regression tests: three fixed flights, and suite totals against `tests/golden.txt`.
+7. **Results against a physical ceiling.**
+   - At every engine failure the simulation records whether an ideal plan (no margins, true wind, any aim point) reaches the runway.
+   - `engine` and `montecarlo` report each failure point against that ceiling.
+   - The tuner no longer charges the parameters for failures beyond it.
+8. **The lift-table kink.** JSBSim's c172p has CL 0.73 at α 0.09 and 0.83 at 0.10, a slope twice that either side, which put a kink at best glide (L/D 8.74 at 70 kt, 8.13 at 72). The 0.09 point is raised onto the line above (0.78). The polar is now smooth: best L/D 9.0 at 76 kt, minimum sink 811 fpm at 70 kt. The planner reads the model's own trimmed glide, elevator trim drag included (`GlideTable`), instead of an untrimmed polar that was up to 11% optimistic below 70 kt.
+
+**Re-tune.** `autotune 14 120 2` improved the training cost from 0.419 to 0.294, but on the 240 hold-out flights only from 0.399 to 0.371, with no more passes. On the suites the tuned set was mixed: normal scenarios 20 → 17, short-field 19 → 22, engine 25 → 24, Monte Carlo normal 77 → 80%. The defaults were kept.
+
+**Also new:** a cockpit view with a head-up display (pitch ladder, flight path marker, bank scale, heading/speed/altitude tapes, vertical speed, modes). The page drops to 1× when the engine fails.
 
 ## Crosswind, base and final engine failures (23 Oct)
 
@@ -393,46 +432,41 @@ The view is a perspective renderer drawn on the 2D canvas, so there is no depend
 
 ## Results
 
-| Suite (native) | 6DOF (autotuned) | Point-mass (hand-tuned) |
-|---|---|---|
-| `scenarios`: 14 cases × 2 circuits | 24/28 | 22/28 |
-| `engine`: 60 engine-failure cases | 55/60 | 56/60 |
-| `montecarlo 400`, normal circuits | 98% | 85% |
-| `montecarlo 400`, engine failures | 92% | 93% |
+With the scoring from the 23 Oct review: every landing scored on touchdown speed and nose-up attitude, and glide-back returns also on centreline and crab. The figures are not comparable with earlier ones, which allowed 58 kt flat touchdowns.
 
-Before roll anti-windup and autotuning, the 6DOF results were 23/28, 55/60, 97% and 93%.
+| Suite (native, 6DOF) | Now |
+|---|---|
+| `scenarios`: 14 cases × 2 circuits | 23/28 |
+| `stol`: 4 winds × 2 seeds per strip | 18/24 |
+| `engine`: 60 cases | 25/60; 24/36 within the physical ceiling |
+| `montecarlo 400`, normal circuits | 81% |
+| `montecarlo 400`, engine failures | 36%; 72/116 (62%) within the ceiling |
+| `xw_sweep` (crosswind-leg failures) | 14/71 |
 
-Before the C172P tables, with the hand-picked coefficients, the figures were:
+Monte Carlo engine failures by failure point (cases, within the ceiling, passed):
 
-| Suite | 6DOF | Point-mass |
-|---|---|---|
-| `scenarios` | 23/28 | 23/28 |
-| `engine` | 57/60 | 54/60 |
-| Monte Carlo, normal circuits | 94% | 84% |
-| Monte Carlo, engine failures | 94% | 96% |
+| Failure point | Cases | Ceiling | Passed |
+|---|---|---|---|
+| Take-off roll 40 kt | 21 | 21 | 21 |
+| Climb 200 / 450 ft | 40 | 0 | 0 |
+| Crosswind leg | 22 | 15 | 5 |
+| Downwind early | 25 | 22 | 12 |
+| Downwind mid | 19 | 19 | 12 |
+| Abeam threshold | 19 | 19 | 14 |
+| Base | 18 | 6 | 1 |
+| Final 400 ft | 19 | 3 | 4 |
+| Final 150 ft | 31 | 11 | 8 |
+
+**Where it fails now:**
+- **Gusty landings, normal and power-off.** The hold-off makes them harder: a lull in the float drops the aircraft in. This is the largest group: 13 hard, 13 flat and 12 crabbed among the gusty normal circuits; 24 hard and 11 flat among the power-off ones. The old scoring hid it by letting every landing hit the runway at approach speed.
+- **Power-off overruns** (27). The hold-off float from the power-off approach speed is planned, but not always accurately.
+- **Crosswind-leg and base failures** reachable in principle but planned or flown short. The margins and reserve are what the tuner adjusts.
+- **Direct crosswinds of 15 kt and more.** The rudder holds about 11° of sideslip at touchdown speed, close to the C172's demonstrated 15 kt.
+- **Beyond the ceiling.** Climb-out failures and the Standard circuit's base and final can't be saved by any plan.
 
 The Monte Carlo runs use winds of 0–15 kt from any direction, 40% of them gusty, across both circuits and random failure points.
 
-**Power-off returns in strong wind** (`cargo run --release --example eo_wind_sweep`):
-- 144 cases per model: both circuits, 8 wind directions at 15, 20 and 25 kt, and failures early on downwind, mid-downwind and abeam the threshold.
-
-| | Before | After |
-|---|---|---|
-| 6DOF, passed | 113/144 | 143/144 |
-| Point-mass, passed | 102/144 | 139/144 |
-| 6DOF, overshoot through the centreline, worst / mean | 295 m / 35 m | 36 m / 3 m |
-| Point-mass, overshoot, worst / mean | 348 m / 45 m | 311 m / 9 m |
-
-The overshoot now includes the S-turns, which cross the centreline on purpose. Since field landings now turn into wind, almost all of these pass. The few that remain are long arrivals after failures right at the end of downwind.
-
-The standard suites barely move:
-- 6DOF: `engine` 56/60 (was 55); Monte Carlo engine failures 95% (was 92%); 450 m-strip engine failures 17/20 (was 18).
-- Point-mass: `engine` 55/60 (was 56); 450 m-strip engine failures 15/20 (was 18); Monte Carlo engine failures 96% (was 93%).
-
-**Where it still fails:**
-- **Normal circuits:** the 6DOF failures in `scenarios` are 20–25 kt direct crosswinds. The C172P rudder (±16°, JSBSim) runs out of sideslip at 10–12°, so the aircraft lands with 9–16° of crab left. That is the real airframe's limit, near its 15 kt demonstrated crosswind, not a control fault.
-- **Engine failures:** the remaining Monte Carlo failures are mostly gusty power-off landings at 3.2–4.4 ft/s against the 3 ft/s limit. Without power, nothing catches a lull in the last few feet.
-- **Point-mass model:** its gusty failures are mostly centreline error. Its gusts move the aircraft without changing its airspeed.
+Earlier results (strong-wind power-off sweep, the pre-review failure analysis) are in the dated sections above. They used the old planner and the old scoring.
 
 **Parity checks:**
 - The first Rust port matched the TypeScript core on all 88 cases (normal and engine failure, both circuits), to printed precision: `ts/test/parity.ts` against `circuitsim parity`. The autopilot changes above came afterwards.
@@ -456,6 +490,9 @@ cargo build --release
 ./target/release/circuitsim stol [6dof]       # normal vs short-field on 1200/600/450 m strips
 ./target/release/circuitsim tunecheck         # inner-loop step responses + margin check
 ./target/release/circuitsim autotune 6dof 14 120 2   # generations, training flights, threads
+cargo test --release --lib --test suites       # unit tests + whole-flight regressions (tests/golden.txt)
+cargo run --release --example xw_sweep         # engine failures along the crosswind leg
+cargo run --release --example energy_check     # planner energy model against the flown glide
 
 cd ../web && ./build.sh                         # → ../circuit-autopilot-sim.html
 ```
@@ -509,6 +546,9 @@ Normal technique touches down beyond the first third of the short strips, which 
 Nothing now runs off the end. The remaining failures are hard arrivals.
 
 ## Next
+
+- **Auto-land from a random state:** an unusual-attitude recovery phase, then the Dubins planner with power to a final fix, scored by the same rows against a "recoverable" ceiling (discussed 23 Oct).
+- **Gusty landings with the hold-off:** a shorter hold-off in turbulence, or a gust-aware sink floor.
 
 - **A longer tuning run:** more training flights (240+), the `stol` and `engine` suites added to the training mix, and a start from the current values.
 - **Gusty power-off arrivals:** these are the largest remaining failure group, at 3.2–4.4 ft/s. Options are a flare that reads the gust estimate and holds a little more speed into the last few feet, or a predicted-lull pitch feed-forward.

@@ -119,7 +119,7 @@ export class PlanView {
     ctx.restore();
   }
 
-  /** Failure point, the planned power-off route (base key, intercept) or the field ahead. */
+  /** Failure point, the planned power-off path (to where it joins the centreline, then the aim point) or the field ahead. */
   private drawEngineOut(sim: Frame, ctx: CanvasRenderingContext2D, X: (x: number) => number, Y: (y: number) => number, sc: number): void {
     const eo = sim.autopilot.engineOut; if (!eo) return;
     const P = this.pal, col = P.get('--ph-eo'), ac = sim.aircraft, fDisp = P.get('--f-display');
@@ -134,10 +134,15 @@ export class PlanView {
       const pts = sim.phase === 'EO_FINAL' ? [[ac.x, ac.y], sim.autopilot.eoEnd.aim] : g.route;
       pts.forEach((p, i) => (i ? ctx.lineTo(X(p[0]), Y(p[1])) : ctx.moveTo(X(p[0]), Y(p[1])))); ctx.stroke();
       ctx.setLineDash([]); ctx.font = `700 10px ${fDisp}`;
-      if (sim.phase === 'EO_GLIDE') g.route.slice(1, -1).forEach((p, i, a) => {
-        ctx.beginPath(); ctx.arc(X(p[0]), Y(p[1]), 3.5, 0, 7); ctx.fill();
-        ctx.fillText(i === a.length - 1 ? 'IP' : 'KEY', X(p[0]), Y(p[1]) + 15);
-      });
+      // the route is the planned path (turn, straight, turn) sampled, then where it joins the centreline
+      // and the touchdown aim point
+      if (sim.phase === 'EO_GLIDE' && g.route.length >= 2) {
+        const marks: [number[], string][] = [[g.route[g.route.length - 2], 'JOIN'], [g.route[g.route.length - 1], 'AIM']];
+        for (const [p, label] of marks) {
+          ctx.beginPath(); ctx.arc(X(p[0]), Y(p[1]), 3.5, 0, 7); ctx.fill();
+          ctx.fillText(label, X(p[0]), Y(p[1]) + 15);
+        }
+      }
     } else if (eo.plan === 'LAND_AHEAD' && !sim.touchdown) {
       ctx.setLineDash([7, 4]); ctx.lineWidth = 1.8; ctx.beginPath();
       const len = Math.max(400, ac.stillAirReach);

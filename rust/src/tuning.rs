@@ -30,7 +30,7 @@ pub struct Tuning {
     pub gust_k: f64,
     /// Power-off gust margin, × σ.
     pub gust_k_eo: f64,
-    /// Flare lull protection engages below this multiple of the stall speed.
+    /// Flare lull protection engages below this multiple of the touchdown speed.
     pub lull_vs: f64,
     /// Power-off planning: required height multiplier.
     pub eo_margin_factor: f64,
@@ -65,7 +65,7 @@ impl Default for Tuning {
             vapp_eo_kt: 67.2,
             gust_k: 1.33,
             gust_k_eo: 1.48,
-            lull_vs: 1.0,
+            lull_vs: 0.97,
             eo_margin_factor: 1.04,
             eo_margin_height: 5.0,
             // the trimmed model's glide is flat (L/D 8.4–9.0 over 68–82 kt, best at 76): 70 kt gives 8.7 and
@@ -104,7 +104,7 @@ pub const DIMS: [Dim; NT] = [
     Dim { name: "vapp_eo_kt", log: false, scale: 2.0, lo: 60.0, hi: 72.0 },
     Dim { name: "gust_k", log: false, scale: 0.5, lo: 0.0, hi: 3.0 },
     Dim { name: "gust_k_eo", log: false, scale: 0.5, lo: 0.0, hi: 3.0 },
-    Dim { name: "lull_vs", log: false, scale: 0.03, lo: 0.95, hi: 1.1 },
+    Dim { name: "lull_vs", log: false, scale: 0.02, lo: 0.9, hi: 1.02 },
     Dim { name: "eo_margin_factor", log: false, scale: 0.05, lo: 0.9, hi: 1.3 },
     Dim { name: "eo_margin_height", log: false, scale: 8.0, lo: -10.0, hi: 60.0 },
     Dim { name: "vbg_kt", log: false, scale: 2.0, lo: 66.0, hi: 84.0 },

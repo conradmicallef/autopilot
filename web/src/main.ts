@@ -27,7 +27,7 @@ class App {
   private readonly profile = new ProfileView($<HTMLCanvasElement>('prof'), this.pal);
   private readonly adi = new AttitudeIndicator($<HTMLCanvasElement>('adi'), this.pal);
   private readonly v3 = new View3D($<HTMLCanvasElement>('map'), this.pal);
-  private view: 'plan' | 'chase' | 'tower' = 'plan';
+  private view: 'plan' | 'chase' | 'tower' | 'cockpit' = 'plan';
   private track: TrackPoint[] = [];
   private f!: Frame;
   private logCount = -1;
@@ -74,16 +74,18 @@ class App {
     // view switch: plan chart or one of the 3D cameras, on the same canvas; the flight carries on
     $('view').addEventListener('click', e => {
       const b = (e.target as HTMLElement).closest('button'); if (!b) return;
-      this.view = b.dataset.v as 'plan' | 'chase' | 'tower';
+      this.view = b.dataset.v as 'plan' | 'chase' | 'tower' | 'cockpit';
       this.syncToggle('view', 'v', this.view);
       this.v3.active = this.view !== 'plan';
       // dragging orbits the 3D chase camera; elsewhere the page keeps scrolling on touch
       $('map').style.touchAction = this.view === 'chase' ? 'none' : 'auto';
       if (this.view !== 'plan') this.v3.mode = this.view;
-      $('viewLabel').textContent = this.view === 'plan' ? 'Plan view' : '3D view';
+      $('viewLabel').textContent = this.view === 'plan' ? 'Plan view' : this.view === 'cockpit' ? 'Cockpit' : '3D view';
       $('viewHint').textContent = this.view === 'plan'
         ? 'Dashed: planned circuit · Solid: flown track, coloured by phase · Dotted ring: glide footprint (green = runway in power-off reach)'
-        : 'Track coloured by phase, with its ground shadow · Dotted ring on the ground: glide footprint · Dashed: planned circuit';
+        : this.view === 'cockpit'
+          ? 'Head-up display: pitch ladder, flight path marker (circle: where the aircraft is going), bank scale, heading, speed and altitude tapes, modes'
+          : 'Track coloured by phase, with its ground shadow · Dotted ring on the ground: glide footprint · Dashed: planned circuit';
     });
     for (const id of ['wdir', 'wspd', 'gusts']) $(id).addEventListener('input', () => this.syncWind());
     // each of these starts a new flight with the changed setup
@@ -205,7 +207,8 @@ class App {
       // phase changes, plus marker events that are not phases (an unknown one must never break the page)
       const info = (PHASES as Record<string, { name: string; token: string } | undefined>)[e.phase];
       const marker: Record<string, [string, string]> = {
-        DESCENT: ['Begin descent', '--muted'], ENGINE_FAILURE: ['Engine failure', '--ph-eo'], STRETCH: ['Stretch to runway', '--ph-eo']
+        DESCENT: ['Begin descent', '--muted'], ENGINE_FAILURE: ['Engine failure', '--ph-eo'], STRETCH: ['Stretch to runway', '--ph-eo'],
+      REPLAN: ['New glide plan', '--ph-eo'], EXTEND: ['Longer path (high)', '--ph-eo']
       };
       const [name, tok] = info ? [info.name, info.token] : marker[e.phase] ?? [e.phase.replace(/_/g, ' ').toLowerCase(), '--muted'];
       return `<span class="mut l">${mmss(e.t)}</span><span class="ph" style="color:var(${tok})">${name}${e.note ? `<small>${e.note}</small>` : ''}</span>`

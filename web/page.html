@@ -16,7 +16,7 @@
   --f-mono: "IBM Plex Mono", ui-monospace, "SFMono-Regular", Menlo, monospace;
   --r: 6px;
   --sky-top: #8fb6d8; --sky-low: #dde8ee; --earth: #b8c6a2; --grid3d: rgba(40, 70, 40, 0.18); --runway3d: #4a5356; --rwmark3d: #eef2ee;
-  --tree: #3f6b3a; --shadow3d: rgba(0, 0, 0, 0.25); --plane-wing: #f4f6f3; --plane-body: #e2e7e3; --plane-tail: #c23f2b; --plane-edge: #1c2a2d; --hud3d: #1c2a2d;
+  --tree: #3f6b3a; --shadow3d: rgba(0, 0, 0, 0.25); --plane-wing: #f4f6f3; --plane-body: #e2e7e3; --plane-tail: #c23f2b; --plane-edge: #1c2a2d; --hud3d: #1c2a2d; --hud: #1f9e52;
 }
 @media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) {
   --paper: #111a1c; --panel: #172225; --ink: #e2ebe7; --muted: #8d9c99; --line: #2a383b;
@@ -25,7 +25,7 @@
   --ph-ground: #8d9796; --ph-climb: #45b39c; --ph-xwind: #6b9be0; --ph-down: #a38ae6; --ph-base: #e3a043; --ph-final: #f0705b; --ph-flare: #b5c0bf; --ph-ga: #f2b33d; --ph-eo: #ff6f86;
   --glass: #0a1012; --glass-2: #111b1e; --glass-line: #253438;
   --sky-top: #0d2131; --sky-low: #30506a; --earth: #25311f; --grid3d: rgba(220, 235, 220, 0.10); --runway3d: #3a4447; --rwmark3d: #dfe6e2;
-  --tree: #6aa062; --shadow3d: rgba(0, 0, 0, 0.45); --plane-wing: #dfe6e2; --plane-body: #c6cfcc; --plane-tail: #f0705b; --plane-edge: #0a1012; --hud3d: #e2ebe7;
+  --tree: #6aa062; --shadow3d: rgba(0, 0, 0, 0.45); --plane-wing: #dfe6e2; --plane-body: #c6cfcc; --plane-tail: #f0705b; --plane-edge: #0a1012; --hud3d: #e2ebe7; --hud: #5df08f;
   color-scheme: dark; } }
 :root[data-theme="dark"] {
   --paper: #111a1c; --panel: #172225; --ink: #e2ebe7; --muted: #8d9c99; --line: #2a383b;
@@ -34,7 +34,7 @@
   --ph-ground: #8d9796; --ph-climb: #45b39c; --ph-xwind: #6b9be0; --ph-down: #a38ae6; --ph-base: #e3a043; --ph-final: #f0705b; --ph-flare: #b5c0bf; --ph-ga: #f2b33d; --ph-eo: #ff6f86;
   --glass: #0a1012; --glass-2: #111b1e; --glass-line: #253438;
   --sky-top: #0d2131; --sky-low: #30506a; --earth: #25311f; --grid3d: rgba(220, 235, 220, 0.10); --runway3d: #3a4447; --rwmark3d: #dfe6e2;
-  --tree: #6aa062; --shadow3d: rgba(0, 0, 0, 0.45); --plane-wing: #dfe6e2; --plane-body: #c6cfcc; --plane-tail: #f0705b; --plane-edge: #0a1012; --hud3d: #e2ebe7;
+  --tree: #6aa062; --shadow3d: rgba(0, 0, 0, 0.45); --plane-wing: #dfe6e2; --plane-body: #c6cfcc; --plane-tail: #f0705b; --plane-edge: #0a1012; --hud3d: #e2ebe7; --hud: #5df08f;
   color-scheme: dark; }
 
 * { box-sizing: border-box; }
@@ -190,7 +190,7 @@ button.eo-btn { border-color: var(--ph-eo); color: var(--ph-eo); }
     <section class="sheet">
       <div class="sheet-head"><span class="label" id="viewLabel">Plan view</span>
         <div class="seg" id="view" role="group" aria-label="View">
-          <button type="button" data-v="plan" aria-pressed="true">Plan</button><button type="button" data-v="chase" aria-pressed="false" title="Behind the aircraft; drag to orbit, scroll to zoom">3D chase</button><button type="button" data-v="tower" aria-pressed="false" title="From beside the runway">3D tower</button>
+          <button type="button" data-v="plan" aria-pressed="true">Plan</button><button type="button" data-v="chase" aria-pressed="false" title="Behind the aircraft; drag to orbit, scroll to zoom">3D chase</button><button type="button" data-v="tower" aria-pressed="false" title="From beside the runway">3D tower</button><button type="button" data-v="cockpit" aria-pressed="false" title="Pilot's eye with a head-up display">Cockpit</button>
         </div>
         <span class="hint" id="viewHint">Dashed: planned circuit · Solid: flown track, coloured by phase · Dotted ring: glide footprint (green = runway in power-off reach)</span></div>
       <canvas id="map"></canvas>
@@ -248,9 +248,9 @@ button.eo-btn { border-color: var(--ph-eo); color: var(--ph-eo); }
   </div>
   <section class="about" aria-label="How it works">
     <div><span class="label">Flight model</span><p><b id="modelNote"></b> The autopilot's control laws fly it through the real dynamics: phugoid, Dutch roll, adverse yaw, propeller torque, gear loads. It runs in Rust, compiled to WebAssembly.</p></div>
-    <div><span class="label">Autopilot</span><p>Pitch-for-speed climb, pitch-for-path approach with throttle on speed. Below 300 ft a stabilised-approach gate triggers a go-around after 2 s outside limits. In a crosswind the approach is flown crabbed, then below 60 ft rudder aligns the nose and the into-wind wing goes down. Turbulence is measured from the wind estimate (GPS minus air data): it sets the gust margin on the approach speed, softens the short-field flare, and adds power in the flare if a lull drops the speed below 1.3 Vs. Every command is rate-limited, so no mode change steps a control.</p></div>
+    <div><span class="label">Autopilot</span><p>Pitch-for-speed climb, pitch-for-path approach with throttle on speed. Below 300 ft a stabilised-approach gate triggers a go-around after 2 s outside limits. In a crosswind the approach is flown crabbed, then below 60 ft rudder aligns the nose and the into-wind wing goes down. The flare holds off just above the runway while the speed bleeds to 1.05 × the stall speed (plus ¾ of any crosswind), so the wheels touch slow and nose-up. Turbulence is measured from the wind estimate (GPS minus air data): it sets the gust margin on the approach speed, softens the short-field flare, and adds power in the flare if a lull drops the speed below the touchdown speed. Every command is rate-limited, so no mode change steps a control.</p></div>
     <div><span class="label">Short-field technique</span><p>Brakes held until full power, rotate at 48 kt with 10° pitch, best-angle climb at 57 kt to 100 ft. Steep 5.5° power-on approach at 60 kt aimed 40 m past the threshold, firm touchdown without float, flaps up and full braking. The 600 m and 450 m strips have 50 ft trees 150 m beyond each end; the landing check scores distances and tree clearance.</p></div>
-    <div><span class="label">Engine failure</span><p>On the runway it rejects; below 700 ft after take-off it lands ahead; higher up it plans a power-off return to runway 09 or 27, re-checking every second, and lands ahead if neither is reachable. Lined up on final it always goes for the runway, raising the flap if short. Failing the engine drops the speed to 1×. The High circuit keeps the runway within glide reach for longer.</p></div>
+    <div><span class="label">Engine failure</span><p>On the runway it rejects; below 700 ft after take-off it lands ahead; higher up it plans a power-off path to runway 09 or 27: a turn, a straight and a turn (a Dubins path at the 45° bank it flies), joining the centreline anywhere from 1.2 km out to over the runway, with the touchdown anywhere that leaves room to stop. Height for straights and turns comes from the model's own trimmed glide; the wind is the autopilot's estimate. It re-checks every second along the path it is flying and lands ahead only if no plan reaches. On final one energy decision picks flap, a slip or more path. Lined up on final it always goes for the runway. Failing the engine drops the speed to 1×. The High circuit keeps the runway within glide reach for longer.</p></div>
   </section>
 </div>
 

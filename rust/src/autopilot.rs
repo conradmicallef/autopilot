@@ -709,11 +709,17 @@ impl Autopilot {
             Phase::Flare => {
                 self.fma.vert = "FLARE".into();
                 c.flare = true;
-                // lull protection: if a lull drops the airspeed below `lull_vs` × Vs (under the touchdown
-                // speed the hold-off bleeds to), add power to hold it, as a pilot would, rather than run out
-                // of elevator into a hard arrival
+                // lull protection: if a lull drops the airspeed below `lull_vs` × the touchdown speed the
+                // hold-off bleeds to, add power to hold it, as a pilot would, rather than run out of elevator
+                // into a hard arrival
                 let vs = ac.stall_speed(ac.flap_pos);
-                let deficit = self.tune.lull_vs * vs - ac.v;
+                // touchdown speed: 1.05 Vs, plus ¾ of the crosswind (rudder authority), plus half the
+                // gust margin (a gusty landing is flown on, not held off to the last knot)
+                let rwy_hdg = if self.engine_out.is_some() && !self.landing_ahead() { self.eo_end().heading } else { 0.0 };
+                let xwind = emergency::across(wind.v, rwy_hdg).abs();
+                let gust = if self.engine_out.is_some() { self.gust_add_eo() } else { self.gust_add() };
+                let v_td = TD_SPEED * vs + TD_XWIND_K * xwind + 0.5 * gust;
+                let deficit = self.tune.lull_vs * v_td - ac.v;
                 c.thr = if self.engine_out.is_none() && deficit > 0.0 {
                     clamp(0.3 * deficit, 0.0, 0.6) * (0.3 + 0.7 * self.gust.level())
                 } else {
@@ -748,10 +754,6 @@ impl Autopilot {
                 // hold-off: round out to just above the runway and let the speed bleed; the sink floor
                 // comes in only as the speed nears the touchdown speed, so the wheels touch slow and
                 // nose-up instead of at the approach speed
-                // in a crosswind, touch down faster by ¾ of the crosswind for rudder authority
-                let rwy_hdg = if self.engine_out.is_some() && !self.landing_ahead() { self.eo_end().heading } else { 0.0 };
-                let xwind = emergency::across(wind.v, rwy_hdg).abs();
-                let v_td = TD_SPEED * vs + TD_XWIND_K * xwind;
                 let theta = self.path.vertical_speed(ac, -flare_sink(ac.h, ac.v, v_td, floor, self.flare_k), dt);
                 // never past the tail-strike attitude
                 c.theta = theta.min(ac.spec.tail_strike_pitch - 0.5 * D2R);

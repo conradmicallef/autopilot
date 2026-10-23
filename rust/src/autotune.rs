@@ -119,7 +119,7 @@ pub fn closeness(s: &Simulation) -> f64 {
     if td.on_runway {
         // landed like a landing: on the centreline, slow and nose-up
         c += clamp((td.y.abs() - 2.0) / 3.5, 0.0, 1.0);
-        let limit = crate::simulation::TD_SPEED_MAX * td.vs + crate::autopilot::TD_XWIND_K * td.xwind;
+        let limit = crate::simulation::TD_SPEED_MAX * td.vs + crate::autopilot::TD_XWIND_K * td.xwind + if td.gusty { crate::simulation::GUST_TD_ALLOWANCE } else { 0.0 };
         c += clamp((td.v - (limit - 3.0 * KT)) / (4.0 * KT), 0.0, 1.0);
         c += clamp((crate::simulation::TD_PITCH_MIN + 2.0 - td.pitch / D2R) / 3.0, 0.0, 1.0);
     }
