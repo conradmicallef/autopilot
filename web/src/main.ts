@@ -92,10 +92,10 @@ class App {
       if (this.view !== 'plan') this.v3.mode = this.view;
       $('viewLabel').textContent = this.view === 'plan' ? 'Plan view' : this.view === 'cockpit' ? 'Cockpit' : '3D view';
       $('viewHint').textContent = this.view === 'plan'
-        ? 'Dashed: planned circuit · Solid: flown track, coloured by phase · Dotted ring: glide footprint (green = runway in power-off reach)'
+        ? 'Dashed: planned circuit · Solid: flown track, coloured by phase · Dotted outline: glide footprint, turn included, drifted by the wind (green = runway in power-off reach)'
         : this.view === 'cockpit'
           ? 'Head-up display: pitch ladder, flight path marker (circle: where the aircraft is going), bank scale, heading, speed and altitude tapes, modes'
-          : 'Track coloured by phase, with its ground shadow · Dotted ring on the ground: glide footprint · Dashed: planned circuit';
+          : 'Track coloured by phase, with its ground shadow · Dotted outline on the ground: glide footprint · Dashed: planned circuit';
     });
     for (const id of ['wdir', 'wspd', 'gusts']) $(id).addEventListener('input', () => this.syncWind());
     // each of these starts a new flight with the changed setup

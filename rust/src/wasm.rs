@@ -141,7 +141,11 @@ fn frame(s: &Simulation, cursor: usize) -> String {
     j.k("stalled").bool(ac.stalled).k("onGround").bool(ac.on_ground).k("engineFailed").bool(ac.engine_failed);
     j.k("stillAirReach").num(ap.planner.still_air_reach(ac));
     let (fc, fr) = ap.planner.footprint(ac, ap.gust.mean_wind());
-    j.k("glideFootprint").obj().k("c").point(fc).k("r").num(fr).end_obj();
+    j.k("glideFootprint").obj().k("c").point(fc).k("r").num(fr).k("shape").arr();
+    for p in ap.planner.footprint_shape(ac, ap.gust.mean_wind()) {
+        j.point(p);
+    }
+    j.end_arr().end_obj();
     j.k("six");
     match &ac.six {
         Some(x) => {

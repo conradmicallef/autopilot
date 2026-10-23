@@ -158,9 +158,10 @@ export class View3D {
     if (!ac.onGround && sim.phase !== 'FLARE' && fp && fp.r > 30) {
       const ok = sim.reach.reachable === true;
       ctx.strokeStyle = ok ? P.get('--ok') : P.get('--bad'); ctx.lineWidth = 1.5; ctx.setLineDash([4, 5]); ctx.beginPath();
-      for (let k = 0; k < 72; k++) {
-        const a0 = (k / 72) * 2 * Math.PI, a1 = ((k + 1) / 72) * 2 * Math.PI;
-        line([fp.c[0] + fp.r * Math.cos(a0), fp.c[1] + fp.r * Math.sin(a0), 0], [fp.c[0] + fp.r * Math.cos(a1), fp.c[1] + fp.r * Math.sin(a1), 0]);
+      const sh = fp.shape;
+      for (let k = 0; k < sh.length; k++) {
+        const a = sh[k], b = sh[(k + 1) % sh.length];
+        line([a[0], a[1], 0], [b[0], b[1], 0]);
       }
       ctx.stroke(); ctx.setLineDash([]);
     }

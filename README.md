@@ -466,6 +466,27 @@ The power-off plan's height budget has no slack for a wider or earlier turn, so 
 
 **Orbit down beside the field, not where the engine stopped (23 Oct, later).** With more than 150 m of height to spare, the glide used to orbit wherever the aircraft was. It could be anywhere within 3 km of the field, so it spent height far out, with the runway at the edge of reach. Now it glides straight to an orbit point 700 m abeam the runway's middle, on its own side. It orbits there at 30° until the surplus is under 70 m, then flies the planned path. Random engine-out starts that need an orbit: before, 45 of 47 orbited more than 1.5 km out and 37 landed. Now 34 of 34 orbit within 1.2 km and all land (`examples/orbit_check.rs`). Random engine-out starts overall: 49 → 57 of 100, with 96 runway landings, up from 88.
 
+**Glide footprint with the turn included (23 Oct, later).** The footprint used to be a circle of radius height × L/D, drifted by the wind. That is only true if the aircraft could point in any direction for free. Now it is computed for each final heading, every 5°:
+- the turn onto that heading, the short way, at the planning bank and speed, which costs height for the load factor and the roll-in
+- then a straight glide at best glide with the height that is left
+- all in the air mass, then drifted by the wind for the time it takes
+
+At 1,000 ft in calm air it reaches about 2.6 km ahead but only 1.8 km behind, offset sideways by the turn. In wind it stretches downwind. The planner's own decision, the green or red colour, is unchanged.
+
+**Lined-up final before touchdown** (`examples/lined_final.rs`): the distance flown before touchdown within 5° of the runway heading and 15 m of the centreline.
+
+| Flights | Median | Worst 10% |
+|---|---|---|
+| Normal circuits | 2,066 m | 1,120 m |
+| Power-off returns | 399 m | 206 m |
+| Random engine-out starts | 799 m | 364 m |
+
+Two causes, both seen in the traces:
+- The planner, when height is tight, picks a join point only 50–150 m before the threshold, because a further-out join costs height.
+- The final turn runs 40–50 m wide and is then corrected in an S over the next few hundred metres.
+
+Ranking a 300 m lined-up final above the second half of the height reserve made little difference to the line-up (median 425 m), and cost some landings (Monte Carlo power-off 37% → 35%), so it was dropped.
+
 **Take-off flap** is 10°, retracted at 300 ft (seen in the traces as `fl10`).
 
 ## Results

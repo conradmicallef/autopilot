@@ -14,6 +14,9 @@ fn main() {
     let (mut done, mut last) = (false, -1.0);
     while !s.finished() && s.t < 1200.0 {
         if !done && (trig.when)(&s) { done = s.fail_engine(); }
+        if done && std::env::var("PLAN").is_ok() && (s.t * 10.0).round() as i64 % 50 == 0 {
+            if let Some(g) = &s.autopilot.glide { println!("   plan: {} join {:.0} aim {:.0} surplus {:.0} required {:.0} reachable {}", g.end.name, g.ip_distance, g.aim, g.surplus, g.required, g.reachable); }
+        }
         s.step();
         if done && s.t - last >= 1.0 && s.aircraft.h > 15.0 {
             last = s.t;

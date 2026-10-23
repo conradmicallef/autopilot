@@ -25,7 +25,7 @@ export interface Frame {
     psi: number; beta: number; gamma: number; theta: number; phi: number;
     thr: number; flapPos: number; flaps: number; alpha: number; verticalSpeed: number;
     noseHeading: number; track: number; groundSpeed: number;
-    stalled: boolean; onGround: boolean; engineFailed: boolean; stillAirReach: number; glideFootprint: { c: Point; r: number };
+    stalled: boolean; onGround: boolean; engineFailed: boolean; stillAirReach: number; glideFootprint: { c: Point; r: number; shape: Point[] };
     /** Present only for the 6DOF model: control-surface positions (rad) and gear loads (N). */
     six: { de: number; da: number; dr: number; steer: number; loads: [number, number, number, number]; alpha: number; beta: number } | null;
   };

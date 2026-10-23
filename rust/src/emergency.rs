@@ -404,6 +404,41 @@ impl GlidePlanner {
         ([ac.x + wind.x * t, ac.y + wind.y * t], h * ld)
     }
 
+    /// Glide footprint outline: for each final heading (every 5°), the turn onto it the short way at the
+    /// planning bank and speed, which costs height (load factor, and the roll-in), then a straight glide at
+    /// best glide with what is left, all in the air mass and then drifted by the wind for the time it
+    /// takes. Behind the aircraft the turn eats into the glide, so the shape is a drifted cardioid rather
+    /// than a circle; downwind it reaches further than upwind.
+    pub fn footprint_shape(&self, ac: &Aircraft, wind: Vec2) -> Vec<Point> {
+        let h = ac.h.max(0.0);
+        let r = self.turn_radius(ac);
+        let rates = self.height_rates(ac);
+        let vt = self.turn_speed(ac, self.spec.turn_bank, 0.0);
+        let v = self.spec.vbg;
+        let psi = ac.psi;
+        (0..72)
+            .map(|k| {
+                let th = k as f64 * 5.0 * D2R;
+                let d = crate::units::wrap_pi(th - psi);
+                let sgn = if d >= 0.0 { 1.0 } else { -1.0 };
+                let roll = if d.abs() > 3.0 * D2R { ROLL_LOSS } else { 0.0 };
+                // the arc, cut short if the height runs out in the turn
+                let mut turn = d.abs();
+                let mut left = h - roll - r * turn * rates.1;
+                if left < 0.0 {
+                    turn = ((h - roll).max(0.0) / (r * rates.1)).min(turn);
+                    left = 0.0;
+                }
+                let end_h = psi + sgn * turn;
+                let (cx, cy) = (ac.x - sgn * r * psi.sin(), ac.y + sgn * r * psi.cos());
+                let (ax, ay) = (cx + sgn * r * end_h.sin(), cy - sgn * r * end_h.cos());
+                let straight = left / rates.0;
+                let t = r * turn / vt + straight / v;
+                [ax + straight * end_h.cos() + wind.x * t, ay + straight * end_h.sin() + wind.y * t]
+            })
+            .collect()
+    }
+
     /// Still-air reach in metres from the current height (clean, best glide).
     pub fn still_air_reach(&self, ac: &Aircraft) -> f64 {
         ac.h * ac.glide_ratio(self.spec.vbg, 0.0)
@@ -478,5 +513,18 @@ mod tests {
         let calm = p.assess(&ac, Vec2::default(), &p.ends[0], 150.0, 300.0);
         let head = p.assess(&ac, Vec2 { x: -5.0, y: 0.0 }, &p.ends[0], 150.0, 300.0);
         assert!(head.required > calm.required * 1.1);
+    }
+
+    #[test]
+    fn footprint_reaches_further_ahead_than_behind() {
+        let p = planner(1200.0);
+        let ac = airborne(0.0, 0.0, 300.0, 0.0, &p);
+        let calm = p.footprint_shape(&ac, Vec2 { x: 0.0, y: 0.0 });
+        let ahead = calm[0][0];
+        let behind = -calm[36][0];
+        assert!(ahead > 1.3 * behind, "ahead {ahead:.0} m, behind {behind:.0} m");
+        // a 10 m/s wind from the east carries everything west
+        let windy = p.footprint_shape(&ac, Vec2 { x: -10.0, y: 0.0 });
+        assert!(windy[0][0] < ahead && -windy[36][0] > behind);
     }
 }

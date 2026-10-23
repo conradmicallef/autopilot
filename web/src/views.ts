@@ -98,7 +98,8 @@ export class PlanView {
     ctx.textAlign = 'left'; ctx.font = `500 11px ${fMono}`; ctx.fillText('1 km', bx + bar + 6, by + 3);
   }
 
-  /** Glide footprint, shown all flight: where a straight power-off glide could end, drifted by the wind.
+  /** Glide footprint, shown all flight: where a power-off glide could end, turning onto each heading first
+   *  (the turn costs height, so it reaches less behind than ahead), drifted by the wind.
    *  Green while the planner says a power-off return would make the runway (turns and margins included). */
   private drawFootprint(sim: Frame, ctx: CanvasRenderingContext2D, X: (x: number) => number, Y: (y: number) => number, sc: number): void {
     const ac = sim.aircraft, fp = ac.glideFootprint;
@@ -108,14 +109,15 @@ export class PlanView {
     ctx.save();
     ctx.strokeStyle = col; ctx.fillStyle = col; ctx.lineWidth = 1.4; ctx.setLineDash([3, 4]);
     ctx.globalAlpha = 0.75;
-    ctx.beginPath(); ctx.arc(X(fp.c[0]), Y(fp.c[1]), fp.r * sc, 0, 7); ctx.stroke();
+    // the outline: a turn onto each heading (which costs height), then a straight glide, drifted by the
+    // wind; it reaches furthest ahead and downwind, least behind
+    ctx.beginPath();
+    fp.shape.forEach((p, i) => (i ? ctx.lineTo(X(p[0]), Y(p[1])) : ctx.moveTo(X(p[0]), Y(p[1]))));
+    ctx.closePath(); ctx.stroke();
     ctx.globalAlpha = 0.06; ctx.fill();
-    // wind drift: from the aircraft to the footprint's centre
-    ctx.globalAlpha = 0.6; ctx.setLineDash([]); ctx.lineWidth = 1;
-    ctx.beginPath(); ctx.moveTo(X(ac.x), Y(ac.y)); ctx.lineTo(X(fp.c[0]), Y(fp.c[1])); ctx.stroke();
-    ctx.beginPath(); ctx.arc(X(fp.c[0]), Y(fp.c[1]), 2.5, 0, 7); ctx.fill();
-    ctx.globalAlpha = 0.9; ctx.font = `700 10px ${P.get('--f-display')}`; ctx.textAlign = 'center';
-    ctx.fillText(ok ? 'GLIDE · RWY IN REACH' : 'GLIDE', X(fp.c[0]), Y(fp.c[1]) - fp.r * sc - 5);
+    const top = fp.shape.reduce((m, p) => (Y(p[1]) < Y(m[1]) ? p : m), fp.shape[0]);
+    ctx.globalAlpha = 0.9; ctx.setLineDash([]); ctx.font = `700 10px ${P.get('--f-display')}`; ctx.textAlign = 'center';
+    ctx.fillText(ok ? 'GLIDE · RWY IN REACH' : 'GLIDE', X(top[0]), Y(top[1]) - 5);
     ctx.restore();
   }
 
