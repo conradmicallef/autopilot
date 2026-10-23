@@ -7,7 +7,7 @@ use crate::airfield::{
 use crate::atmosphere::{Rng, Wind, WindSettings};
 use crate::autopilot::{Autopilot, EngineOutPlan, Phase};
 use crate::tuning::{Perturb, Tuning};
-use crate::units::{f1, r0, D2R, FT, KT};
+use crate::units::{f1, f2, r0, D2R, FT, KT};
 use serde::Serialize;
 
 #[derive(Clone, Debug, Serialize)]
@@ -33,6 +33,17 @@ pub struct Touchdown {
     pub crab: f64,
     #[serde(rename = "onRunway")]
     pub on_runway: bool,
+    /// Pitch attitude at touchdown, rad.
+    pub pitch: f64,
+    /// Flap at touchdown, deg.
+    pub flap: f64,
+    /// Airspeed over the stall speed for that flap.
+    #[serde(rename = "vsRatio")]
+    pub vs_ratio: f64,
+    /// Steady crosswind component across the landing direction, m/s.
+    pub xwind: f64,
+    /// Stall speed for the flap set, m/s.
+    pub vs: f64,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -111,10 +122,30 @@ pub struct Simulation {
     pub reach_time: f64,
     next_reach_check: f64,
     pub perf: Performance,
+    /// At an engine failure: could an ideal plan have reached the runway (`ceiling_reachable`)?
+    pub eo_ceiling: Option<bool>,
     /// 50 ft trees beyond each end of the strip.
     pub obstacles: bool,
     prev_x: f64,
     prev_h: f64,
+}
+
+/// Touchdown speed limit, as a multiple of the stall speed for the flap set (about 1.05–1.1 is the
+/// target; 1.15 allows a gust margin).
+pub const TD_SPEED_MAX: f64 = 1.15;
+/// Lowest pitch at touchdown, deg: main wheels first, nose wheel held off.
+pub const TD_PITCH_MIN: f64 = 5.0;
+
+fn touchdown_rows(td: &Touchdown) -> (Criterion, Criterion) {
+    // in a crosswind the technique touches down faster by half the crosswind component
+    let limit = TD_SPEED_MAX * td.vs + crate::autopilot::TD_XWIND_K * td.xwind;
+    let mut sp = crit("Touchdown speed", &format!("≤ {TD_SPEED_MAX} × stall speed + ¾ crosswind"));
+    sp.value = Some(format!("{} kt, {} × Vs (flap {}; limit {} kt)", r0(td.v / KT), f2(td.vs_ratio), r0(td.flap), r0(limit / KT)));
+    sp.pass = Some(td.v <= limit);
+    let mut pt = crit("Nose-up at touchdown", &format!("≥ {TD_PITCH_MIN}° (main wheels first)"));
+    pt.value = Some(format!("{}°", f1(td.pitch / D2R)));
+    pt.pass = Some(td.pitch / D2R >= TD_PITCH_MIN);
+    (sp, pt)
 }
 
 impl Simulation {
@@ -156,6 +187,7 @@ impl Simulation {
             reach_time: 0.0,
             next_reach_check: 0.0,
             perf: Performance::default(),
+            eo_ceiling: None,
             obstacles: len < 1199.0,
             prev_x: 0.0,
             prev_h: 0.0,
@@ -180,8 +212,29 @@ impl Simulation {
         ok
     }
 
+    /// Could the runway be reached at all from here? An ideal plan: the glide planner with no margins,
+    /// the true mean wind, any aim point down to 60 m in. An estimate of the physical ceiling (the
+    /// planner's model, not the flight), recorded at the failure so results can be read against it.
+    pub fn ceiling_reachable(&self) -> bool {
+        let ac = &self.aircraft;
+        if ac.on_ground || self.phase() == Phase::Flare {
+            return true;
+        }
+        let mut spec = self.autopilot.planner.spec.clone();
+        spec.margin_factor = 1.0;
+        spec.margin_height = 0.0;
+        let p = crate::emergency::GlidePlanner::new(self.runway().clone(), spec);
+        let st = self.wind.settings;
+        let to = (90.0 - (st.from_deg + 180.0)) * D2R;
+        let w = crate::units::Vec2 { x: st.speed_kt * KT * to.cos(), y: st.speed_kt * KT * to.sin() };
+        p.plan(ac, w, None).reachable
+    }
+
     /// Stop the engine now; the autopilot decides how to handle it.
     pub fn fail_engine(&mut self) -> bool {
+        if self.autopilot.engine_out.is_none() && self.phase() != Phase::Stopped {
+            self.eo_ceiling = Some(self.ceiling_reachable());
+        }
         let ok = self.autopilot.fail_engine(&self.aircraft, &self.wind);
         if ok {
             self.aircraft.engine_failed = true;
@@ -216,6 +269,16 @@ impl Simulation {
                 v,
                 crab,
                 on_runway: self.autopilot.circuit.runway.contains(ac.x, ac.y),
+                pitch: ac.theta,
+                flap: ac.flap_pos,
+                vs_ratio: v / ac.stall_speed(ac.flap_pos),
+                xwind: {
+                    let s = self.wind.settings;
+                    let to = (90.0 - (s.from_deg + 180.0)) * D2R;
+                    let w = crate::units::Vec2 { x: s.speed_kt * KT * to.cos(), y: s.speed_kt * KT * to.sin() };
+                    crate::emergency::across(w, ac.runway_heading).abs()
+                },
+                vs: ac.stall_speed(ac.flap_pos),
             });
             self.autopilot.on_unexpected_touchdown(&self.aircraft);
         }
@@ -330,6 +393,8 @@ impl Simulation {
             crit("Touchdown point", &td_target),
             crit("Centerline error", "< 5 m"),
             crit("Nose aligned at touchdown", "< 5° crab"),
+            crit("Touchdown speed", &format!("≤ {TD_SPEED_MAX} × stall speed + ¾ crosswind")),
+            crit("Nose-up at touchdown", &format!("≥ {TD_PITCH_MIN}° (main wheels first)")),
             crit("Stopped on runway", &format!("before {} m", r0(rwy.length))),
         ];
         let td = match &self.touchdown {
@@ -346,9 +411,12 @@ impl Simulation {
         let crab_deg = td.crab.abs() / D2R;
         rows[3].value = Some(format!("{}° crab", f1(crab_deg)));
         rows[3].pass = Some(crab_deg < 5.0);
-        rows[4].value =
+        let (sp, pt) = touchdown_rows(td);
+        rows[4] = sp;
+        rows[5] = pt;
+        rows[6].value =
             Some(if stopped { format!("{} m mark", r0(self.aircraft.x)) } else { "rolling…".into() });
-        rows[4].pass = if stopped { Some(self.aircraft.x <= rwy.length) } else { None };
+        rows[6].pass = if stopped { Some(rwy.contains(self.aircraft.x, self.aircraft.y)) } else { None };
         rows.extend(self.distance_rows(stopped));
         rows.push(Criterion {
             label: "Runway within glide reach".into(),
@@ -452,6 +520,20 @@ impl Simulation {
                 c.pass = Some(td.on_runway);
             }
             rows.push(c);
+            // landed like any landing: on the centreline, nose straight, slow and nose-up
+            let mut cl = crit("Centerline error", "< 5 m");
+            let mut cr = crit("Nose aligned at touchdown", "< 5° crab");
+            if let Some(td) = td {
+                cl.value = Some(format!("{} m", f1(td.y.abs())));
+                cl.pass = Some(td.y.abs() < 5.0);
+                let crab_deg = td.crab.abs() / D2R;
+                cr.value = Some(format!("{}° crab", f1(crab_deg)));
+                cr.pass = Some(crab_deg < 5.0);
+                let (sp, pt) = touchdown_rows(td);
+                rows.extend([cl, cr, sp, pt]);
+            } else {
+                rows.extend([cl, cr]);
+            }
             let mut c = crit("Stopped on runway", &format!("within the {} m runway", r0(rwy.length)));
             if stopped {
                 c.value =

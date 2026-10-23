@@ -185,6 +185,13 @@ const BANK_FLOOR: f64 = 15.0;
 /// NEAR_GROUND (no pitching down in the climb, 10° bank on final).
 const LOW_BANK: f64 = 200.0;
 const NEAR_GROUND: f64 = 100.0;
+/// Flare hold-off: touchdown speed (× the stall speed for the flap set), the speed band above it over
+/// which the sink floor fades in (kt), and the wheel height held while the speed bleeds (m).
+const TD_SPEED: f64 = 1.05;
+/// Touchdown speed added per unit of crosswind component (crosswind technique: more rudder authority).
+pub const TD_XWIND_K: f64 = 0.75;
+const HOLD_OFF_BAND: f64 = 5.0;
+const HOLD_OFF_HEIGHT: f64 = 0.3;
 /// Power-off: no flap is raised below this height, ft (the sink while it comes up costs more than it saves).
 const RETRACT_FLOOR: f64 = 100.0;
 /// Lowest height for a forward slip, ft (below it the crosswind alignment law takes over).
@@ -224,6 +231,15 @@ struct EoPath {
     wind: Vec2,
     end: &'static str,
     fix: f64,
+}
+
+/// Flare law: sink rate commanded at wheel height `h` and airspeed `v`. It shrinks in proportion to the
+/// height above the hold-off height (gain `k`, set at flare entry), down to a floor that fades in over
+/// the last `HOLD_OFF_BAND` kt above the touchdown speed `v_td`: fast, the aircraft holds off just above
+/// the runway while the speed bleeds; at the touchdown speed it settles at `floor` m/s.
+pub fn flare_sink(h: f64, v: f64, v_td: f64, floor: f64, k: f64) -> f64 {
+    let settle = clamp((v_td + HOLD_OFF_BAND * KT - v) / (HOLD_OFF_BAND * KT), 0.0, 1.0);
+    floor * settle + k * (h - HOLD_OFF_HEIGHT).max(0.0)
 }
 
 pub struct Autopilot {
@@ -693,9 +709,11 @@ impl Autopilot {
             Phase::Flare => {
                 self.fma.vert = "FLARE".into();
                 c.flare = true;
-                // lull protection: in turbulence, if airspeed sags below 1.2 Vs in the flare, add power
-                // to hold it (as a pilot would) instead of running out of elevator into a hard arrival
-                let deficit = self.tune.lull_vs * ac.stall_speed(ac.flap_pos) - ac.v;
+                // lull protection: if a lull drops the airspeed below `lull_vs` × Vs (under the touchdown
+                // speed the hold-off bleeds to), add power to hold it, as a pilot would, rather than run out
+                // of elevator into a hard arrival
+                let vs = ac.stall_speed(ac.flap_pos);
+                let deficit = self.tune.lull_vs * vs - ac.v;
                 c.thr = if self.engine_out.is_none() && deficit > 0.0 {
                     clamp(0.3 * deficit, 0.0, 0.6) * (0.3 + 0.7 * self.gust.level())
                 } else {
@@ -727,7 +745,14 @@ impl Autopilot {
                     let f = self.procedure.flare_floor;
                     f - (f - 0.4).max(0.0) * self.gust.level()
                 };
-                let theta = self.path.vertical_speed(ac, -(floor + self.flare_k * ac.h), dt);
+                // hold-off: round out to just above the runway and let the speed bleed; the sink floor
+                // comes in only as the speed nears the touchdown speed, so the wheels touch slow and
+                // nose-up instead of at the approach speed
+                // in a crosswind, touch down faster by ¾ of the crosswind for rudder authority
+                let rwy_hdg = if self.engine_out.is_some() && !self.landing_ahead() { self.eo_end().heading } else { 0.0 };
+                let xwind = emergency::across(wind.v, rwy_hdg).abs();
+                let v_td = TD_SPEED * vs + TD_XWIND_K * xwind;
+                let theta = self.path.vertical_speed(ac, -flare_sink(ac.h, ac.v, v_td, floor, self.flare_k), dt);
                 // never past the tail-strike attitude
                 c.theta = theta.min(ac.spec.tail_strike_pitch - 0.5 * D2R);
                 if ac.on_ground {
@@ -951,8 +976,11 @@ impl Autopilot {
                 && (!l.1 || (aligned && ac.h > SLIP_FLOOR * FT))
                 && (l.0 >= current.0 || ac.h > RETRACT_FLOOR * FT)
         };
-        // touchdown distance ahead for each level, and the choice
-        let reach = |l: &(f64, bool)| ac.h / self.planner.gradient(ac, w, l.0, if l.1 { SLIP_SINK_GAIN } else { 1.0 }, &end);
+        // touchdown distance ahead for a level: the glide's reach plus the hold-off float from its speed
+        let reach = |l: &(f64, bool)| {
+            let v = if l.0 >= 20.0 { self.planner.spec.vapp_eo } else { self.planner.spec.vbg };
+            ac.h / self.planner.gradient(ac, w, l.0, if l.1 { SLIP_SINK_GAIN } else { 1.0 }, &end) + self.planner.float_distance(ac, v, l.0, w, &end)
+        };
         let mut best: Option<(usize, f64)> = None;
         for (i, l) in LADDER.iter().enumerate() {
             if !allowed(l) || reach(l) < d_near {
@@ -1017,5 +1045,30 @@ impl Autopilot {
         if self.phase != Phase::Flare {
             self.set_phase(ac, Phase::Flare);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn flare_sink_falls_with_height_and_rises_as_speed_bleeds() {
+        let (v_td, floor, k) = (25.0, 0.4, 0.5);
+        // lower is gentler
+        for v in [24.0, 26.0, 30.0] {
+            let mut last = f64::INFINITY;
+            for i in 0..=20 {
+                let h = 10.0 - 0.5 * i as f64;
+                let s = flare_sink(h, v, v_td, floor, k);
+                assert!(s <= last + 1e-12 && s >= 0.0);
+                last = s;
+            }
+        }
+        // at the hold-off height: no sink while fast, the floor once at the touchdown speed
+        assert!(flare_sink(HOLD_OFF_HEIGHT, v_td + HOLD_OFF_BAND * KT + 1.0, v_td, floor, k).abs() < 1e-12);
+        assert!((flare_sink(HOLD_OFF_HEIGHT, v_td, v_td, floor, k) - floor).abs() < 1e-12);
+        // monotone in speed: slower settles more
+        assert!(flare_sink(1.0, 26.0, v_td, floor, k) >= flare_sink(1.0, 28.0, v_td, floor, k));
     }
 }

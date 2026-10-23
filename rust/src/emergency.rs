@@ -20,9 +20,11 @@ use crate::tuning::Tuning;
 use crate::units::{clamp, Point, Vec2, D2R, FT, G, KT, PI};
 use serde::Serialize;
 
-/// Runway kept beyond the farthest aim point for the flare's float and the ground roll in calm air, m;
-/// it grows with the square of the touchdown ground speed in a tailwind.
-const STOP_ALLOWANCE: f64 = 450.0;
+/// Runway kept beyond the touchdown point for the ground roll in calm air, with a margin, m; it grows
+/// with the square of the touchdown ground speed in a tailwind.
+const STOP_ALLOWANCE: f64 = 300.0;
+/// Touchdown speed of the hold-off, × the full-flap stall speed (as `autopilot::TD_SPEED`).
+const TD_SPEED: f64 = 1.05;
 /// Height lost raising flap from 20–30° to up, m.
 const RETRACT_LOSS: f64 = 8.0;
 /// Height lost to rolling into and out of each turn (the arc is flown below the planned bank for a
@@ -167,6 +169,23 @@ impl GlidePlanner {
         let gs = (v + along(wind, end.heading)).max(0.3 * v);
         self.runway.length - STOP_ALLOWANCE * (gs / v).powi(2)
     }
+    /// Ground distance floated in the hold-off from the approach speed `v` down to the touchdown speed:
+    /// the glide reaches the ground this far before the touchdown point.
+    pub fn float_distance(&self, ac: &Aircraft, v: f64, flap: f64, wind: Vec2, end: &RunwayEnd) -> f64 {
+        let vtd = TD_SPEED * ac.stall_speed(flap);
+        // idle, nearly level: the deceleration is g over the glide ratio at the mean speed (normal
+        // landings measure 1.5 m/s² with full flap: 65 → 49 kt over 156 m)
+        let vm = 0.5 * (v + vtd);
+        let decel = G / ac.glide_ratio(vm, flap);
+        let air = ((v * v - vtd * vtd) / (2.0 * decel)).max(0.0);
+        // over the ground with the wind
+        air * ((vm + along(wind, end.heading)) / vm).max(0.3)
+    }
+    /// Distance from the final fix to where the glide must reach the ground, for a touchdown `aim` past
+    /// the threshold (the float is planned at the power-off approach speed).
+    fn glide_final(&self, ac: &Aircraft, wind: Vec2, end: &RunwayEnd, fix_d: f64, aim: f64) -> f64 {
+        (fix_d + aim - self.float_distance(ac, self.spec.vapp_eo, 30.0, wind, end)).max(0.0)
+    }
 
     /// Glide speed at a bank angle: best glide, or more when the bank needs it for stall margin.
     pub fn turn_speed(&self, ac: &Aircraft, bank: f64, flap: f64) -> f64 {
@@ -227,7 +246,7 @@ impl GlidePlanner {
         // final: straight down the centreline, crabbed, to the aim point
         let v = self.spec.vbg;
         let retract = if ac.flap_pos > 15.0 { RETRACT_LOSS } else { 0.0 };
-        let required = adv * rates.0 + self.path_height(&path, rates) + (fix_d + aim) * self.final_height_per_m(ac, wind, end) + retract;
+        let required = adv * rates.0 + self.path_height(&path, rates) + self.glide_final(ac, wind, end, fix_d, aim) * self.final_height_per_m(ac, wind, end) + retract;
         // speed is energy: above best glide it can be traded for height, below it costs height
         let available = ac.h + (ac.v * ac.v - v * v) / (2.0 * G);
         let surplus = available - (required * self.spec.margin_factor + self.spec.margin_height);
@@ -264,7 +283,7 @@ impl GlidePlanner {
         let v = self.spec.vbg;
         let retract = if ac.flap_pos > 15.0 { RETRACT_LOSS } else { 0.0 };
         let rolls = if arc_left > 1.0 { ROLL_LOSS } else { 0.0 };
-        let required = straight_left * rates.0 + arc_left * rates.1 + rolls + (fix_d + aim) * self.final_height_per_m(ac, wind, end) + retract;
+        let required = straight_left * rates.0 + arc_left * rates.1 + rolls + self.glide_final(ac, wind, end, fix_d, aim) * self.final_height_per_m(ac, wind, end) + retract;
         let available = ac.h + (ac.v * ac.v - v * v) / (2.0 * G);
         let surplus = available - (required * self.spec.margin_factor + self.spec.margin_height);
         let route = vec![[ac.x, ac.y], self.fix_at(fix_d, end), self.aim_at(aim, end)];
@@ -330,7 +349,9 @@ impl GlidePlanner {
     /// The same path with a different aim point: only the final's length changes.
     fn with_aim(&self, a: &GlideAssessment, ac: &Aircraft, wind: Vec2, end: &RunwayEnd, aim: f64) -> GlideAssessment {
         let per_m = self.final_height_per_m(ac, wind, end);
-        let required = a.required + (aim - a.aim) * per_m;
+        let d0 = self.glide_final(ac, wind, end, a.ip_distance, a.aim);
+        let d1 = self.glide_final(ac, wind, end, a.ip_distance, aim);
+        let required = a.required + (d1 - d0) * per_m;
         let surplus = a.available - (required * self.spec.margin_factor + self.spec.margin_height);
         let mut route = a.route.clone();
         if let Some(last) = route.last_mut() {
@@ -410,7 +431,10 @@ mod tests {
         let ac = airborne(-2000.0, 0.0, 300.0, 0.0, &p);
         let a = p.assess(&ac, Vec2::default(), &p.ends[0], 150.0, 300.0);
         let ld = ac.glide_ratio(p.spec.vbg, 0.0);
-        assert!((a.required - 2300.0 / ld).abs() < 1.0, "{} vs {}", a.required, 2300.0 / ld);
+        // the glide meets the ground a hold-off float before the touchdown point
+        let fl = p.float_distance(&ac, p.spec.vapp_eo, 30.0, Vec2::default(), &p.ends[0]);
+        assert!(fl > 50.0 && fl < 400.0, "float {fl}");
+        assert!((a.required - (2300.0 - fl) / ld).abs() < 1.0, "{} vs {}", a.required, (2300.0 - fl) / ld);
     }
 
     #[test]
@@ -426,10 +450,12 @@ mod tests {
     #[test]
     fn reachability_switches_at_the_glide_limit() {
         let p = planner(1200.0);
-        let ld = airborne(0.0, 0.0, 0.0, 0.0, &p).glide_ratio(p.spec.vbg, 0.0);
+        let probe = airborne(0.0, 0.0, 0.0, 0.0, &p);
+        let ld = probe.glide_ratio(p.spec.vbg, 0.0);
+        let fl = p.float_distance(&probe, p.spec.vapp_eo, 30.0, Vec2::default(), &p.ends[0]);
         // 2.85 km out on the centreline, no turn: the nearest acceptable aim point (60 m in) is reachable
         // with just enough height (margins included) and not with a little less
-        let need = (2850.0 + p.spec.aim_min) / ld * p.spec.margin_factor + p.spec.margin_height;
+        let need = (2850.0 + p.spec.aim_min - fl) / ld * p.spec.margin_factor + p.spec.margin_height;
         let ok = p.plan_for(&airborne(-2850.0, 0.0, need + 0.5, 0.0, &p), Vec2::default(), &p.ends[0]);
         let short = p.plan_for(&airborne(-2850.0, 0.0, need - 1.0, 0.0, &p), Vec2::default(), &p.ends[0]);
         assert!((ok.aim - p.spec.aim_min).abs() < 1.0, "aim {}", ok.aim);

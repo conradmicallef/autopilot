@@ -89,9 +89,33 @@ fn scenarios(model: ModelKind) -> i32 {
     0
 }
 
+/// Per failure point: flights, how many an ideal plan could have saved (the ceiling), passes.
+#[derive(Default)]
+struct Tally {
+    n: usize,
+    ceiling: usize,
+    passed: usize,
+    passed_within: usize,
+}
+
+fn print_tally(t: &std::collections::BTreeMap<&str, Tally>) {
+    println!("  {:<15} {:>5} {:>8} {:>7}   pass rate within the ceiling", "failure point", "cases", "ceiling", "passed");
+    let (mut c, mut p) = (0, 0);
+    for (k, v) in t {
+        let within = if v.ceiling > 0 { format!("{:.0}%", 100.0 * v.passed_within as f64 / v.ceiling as f64) } else { "—".into() };
+        println!("  {k:<15} {:>5} {:>8} {:>7}   {within}", v.n, v.ceiling, v.passed);
+        c += v.ceiling;
+        p += v.passed_within;
+    }
+    if c > 0 {
+        println!("  within the ceiling: {p}/{c} ({:.0}%)", 100.0 * p as f64 / c as f64);
+    }
+}
+
 fn engine(model: ModelKind) -> i32 {
     let mut pass = 0;
     let mut total = 0;
+    let mut tally: std::collections::BTreeMap<&str, Tally> = Default::default();
     for circuit in circuits() {
         for w in eo_winds() {
             for tr in eo_triggers() {
@@ -101,20 +125,29 @@ fn engine(model: ModelKind) -> i32 {
                 if ok {
                     pass += 1;
                 }
+                let reach = s.eo_ceiling.unwrap_or(false);
+                let e = tally.entry(tr.name).or_default();
+                e.n += 1;
+                e.ceiling += reach as usize;
+                e.passed += ok as usize;
+                e.passed_within += (ok && reach) as usize;
                 println!(
-                    "{:<8} {:03}/{}{} {:<14} {} t={:.0} | {}",
+                    "{:<8} {:03}/{}{} {:<14} {} {} t={:.0} | {}",
                     circuit.name,
                     w.from_deg,
                     w.speed_kt,
                     if w.gusts { "G" } else { "" },
                     tr.name,
                     if ok { "PASS" } else { "FAIL" },
+                    if reach { "reachable" } else { "beyond   " },
                     s.t,
                     summary(&s)
                 );
             }
         }
     }
+    println!("by failure point (ceiling: an ideal plan reaches the runway, `Simulation::ceiling_reachable`):");
+    print_tally(&tally);
     println!("{pass}/{total} passed");
     0
 }
@@ -248,6 +281,7 @@ fn montecarlo(model: ModelKind, n: usize) -> i32 {
     let mut by_kind: std::collections::BTreeMap<&str, (usize, usize)> = Default::default();
     let mut worst: Vec<(String, String)> = Vec::new();
     let mut reasons: std::collections::BTreeMap<String, usize> = Default::default();
+    let mut tally: std::collections::BTreeMap<&str, Tally> = Default::default();
     for i in 0..n {
         let w = WindSettings {
             from_deg: (rng.next() * 36.0).floor() * 10.0,
@@ -257,14 +291,22 @@ fn montecarlo(model: ModelKind, n: usize) -> i32 {
         let circuit = if rng.next() < 0.5 { standard_circuit() } else { high_circuit() };
         let seed = (rng.next() * 1e6).floor() + 1.0;
         let failure = rng.next() < 0.5;
-        let (kind, s) = if failure {
+        let (kind, s, trig) = if failure {
             let trigs = eo_triggers();
             let tr = &trigs[(rng.next() * trigs.len() as f64) as usize % trigs.len()];
-            ("engine failure", fly_eo(model, w, seed, tr, circuit.clone()))
+            ("engine failure", fly_eo(model, w, seed, tr, circuit.clone()), Some(tr.name))
         } else {
-            ("normal circuit", fly_normal(model, w, seed, None, circuit.clone()))
+            ("normal circuit", fly_normal(model, w, seed, None, circuit.clone()), None)
         };
         let ok = s.passed();
+        if let Some(name) = trig {
+            let reach = s.eo_ceiling.unwrap_or(false);
+            let e = tally.entry(name).or_default();
+            e.n += 1;
+            e.ceiling += reach as usize;
+            e.passed += ok as usize;
+            e.passed_within += (ok && reach) as usize;
+        }
         if !ok {
             let rows = s.evaluate();
             let failed: Vec<String> = if !s.finished() {
@@ -292,6 +334,8 @@ fn montecarlo(model: ModelKind, n: usize) -> i32 {
     for (k, (p, t)) in &by_kind {
         println!("  {k:<15} {p}/{t} passed ({:.0}%)", 100.0 * *p as f64 / *t as f64);
     }
+    println!("  engine failures by failure point:");
+    print_tally(&tally);
     println!("  failed criteria:");
     for (k, n) in &reasons {
         println!("    {n:3}  {k}");

@@ -62,3 +62,10 @@ pub fn f1(v: f64) -> String {
     let a = n.unsigned_abs();
     format!("{}{}.{}", if n < 0 { "-" } else { "" }, a / 10, a % 10)
 }
+
+/// Two-decimal rendering via integer arithmetic (half away from zero).
+pub fn f2(v: f64) -> String {
+    let n = (v * 100.0).round() as i64;
+    let a = n.unsigned_abs();
+    format!("{}{}.{:02}", if n < 0 { "-" } else { "" }, a / 100, a % 100)
+}

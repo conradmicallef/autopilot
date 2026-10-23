@@ -631,3 +631,56 @@ fn axpy(a: &State, b: &State, k: f64) -> State {
     }
     o
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::aircraft::c172_like;
+
+    #[test]
+    fn euler_round_trip() {
+        for &(phi, theta, psi) in &[(0.3, -0.2, 1.0), (-1.0, 0.5, -2.5), (0.0, 0.0, 3.0)] {
+            let q = quat_from_euler(phi, theta, psi);
+            let (a, b, c) = euler(&q);
+            assert!((a - phi).abs() < 1e-9 && (b - theta).abs() < 1e-9 && crate::units::wrap_pi(c - psi).abs() < 1e-9);
+        }
+    }
+
+    /// The autopilot's frame: x east, y north, heading 0 = east counter-clockwise positive, bank + = left
+    /// wing down. The rigid body is NED with JSBSim angles; `observe` converts.
+    #[test]
+    fn observe_converts_to_the_airfield_frame() {
+        let spec = c172_like();
+        let mut m = SixDof::on_runway(&spec);
+        m.x[2] = -500.0;
+        // flying north (NED yaw 0) with the right wing down 20° (JSBSim roll +20°), nose up 5°
+        let (phi, theta) = (20.0 * crate::units::D2R, 5.0 * crate::units::D2R);
+        m.x[6..10].copy_from_slice(&quat_from_euler(phi, theta, 0.0));
+        let v = 35.0;
+        let (ca, sa) = ((theta).cos(), (theta).sin());
+        // body velocity along the flight path (level): u = v cos θ, w = v sin θ in body axes
+        m.x[3] = v * ca;
+        m.x[4] = 0.0;
+        m.x[5] = v * sa;
+        let o = m.observe();
+        assert!((o.psi - PI / 2.0).abs() < 0.05, "north is +90° in the airfield frame: {}", o.psi);
+        assert!(o.phi < 0.0, "right wing down is negative bank: {}", o.phi);
+        assert!((o.v - v).abs() < 0.5);
+        assert!(o.h > 400.0);
+    }
+
+    #[test]
+    fn glide_table_matches_the_trim() {
+        let spec = c172_like();
+        let m = SixDof::on_runway(&spec);
+        let ac = crate::aircraft::Aircraft::new(spec, crate::aircraft::ModelKind::SixDof);
+        for &(kt, flap) in &[(70.0, 0.0), (76.0, 0.0), (66.0, 20.0)] {
+            let v = kt * crate::units::KT;
+            let t = m.glide_trim(v, flap).unwrap();
+            assert!((ac.glide_ratio(v, flap) - t).abs() < 0.05, "{kt} kt flap {flap}: {} vs {t}", ac.glide_ratio(v, flap));
+        }
+        // best glide near 9:1, as the real C172
+        let best = (60..90).map(|k| ac.glide_ratio(k as f64 * crate::units::KT, 0.0)).fold(0.0, f64::max);
+        assert!(best > 8.6 && best < 9.4, "best L/D {best}");
+    }
+}

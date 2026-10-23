@@ -1,0 +1,4 @@
+# Lowest acceptable suite totals (see tests/suites.rs). Raise them when a change improves the results.
+normal 20
+engine 25
+engine_within_ceiling 24

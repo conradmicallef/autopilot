@@ -116,8 +116,14 @@ pub fn closeness(s: &Simulation) -> f64 {
     let sink = td.sink / FT;
     let crab = td.crab.abs() / D2R;
     let mut c = clamp((sink - 1.8) / 1.5, 0.0, 1.0) + clamp((crab - 2.5) / 3.0, 0.0, 1.0);
-    if s.autopilot.engine_out.is_none() {
+    if td.on_runway {
+        // landed like a landing: on the centreline, slow and nose-up
         c += clamp((td.y.abs() - 2.0) / 3.5, 0.0, 1.0);
+        let limit = crate::simulation::TD_SPEED_MAX * td.vs + crate::autopilot::TD_XWIND_K * td.xwind;
+        c += clamp((td.v - (limit - 3.0 * KT)) / (4.0 * KT), 0.0, 1.0);
+        c += clamp((crate::simulation::TD_PITCH_MIN + 2.0 - td.pitch / D2R) / 3.0, 0.0, 1.0);
+    }
+    if s.autopilot.engine_out.is_none() {
         let rwy = s.runway();
         let limit = if s.autopilot.procedure.short_field { rwy.aim_point + 100.0 } else { rwy.length / 3.0 };
         c += clamp((td.x - (limit - 60.0)) / 80.0, 0.0, 1.0);
@@ -144,12 +150,15 @@ pub fn safety(s: &Simulation) -> f64 {
 pub struct Score {
     pub passed: usize,
     pub n: usize,
-    /// Failures + 0.15 × closeness, averaged per flight.
+    /// Flights an ideal plan could have saved (all but the engine failures beyond the physical ceiling).
+    pub winnable: usize,
+    /// Failures of winnable flights + 0.15 × closeness (+ safety), averaged per flight.
     pub cost: f64,
 }
 
 pub fn evaluate(cs: &[Case], model: ModelKind, tu: &Tuning, threads: usize) -> Score {
-    let results: Vec<(bool, f64)> = std::thread::scope(|sc| {
+    // (passed, winnable, closeness + safety)
+    let results: Vec<(bool, bool, f64)> = std::thread::scope(|sc| {
         let handles: Vec<_> = (0..threads)
             .map(|k| {
                 sc.spawn(move || {
@@ -158,7 +167,10 @@ pub fn evaluate(cs: &[Case], model: ModelKind, tu: &Tuning, threads: usize) -> S
                         .filter(|(i, _)| i % threads == k)
                         .map(|(_, c)| {
                             let s = fly(c, model, tu);
-                            (s.passed(), closeness(&s) + safety(&s))
+                            // an engine failure no plan could have saved is not held against the
+                            // parameters: it counts as passed, and only its closeness and safety cost
+                            let winnable = s.eo_ceiling != Some(false);
+                            (s.passed(), winnable, closeness(&s) * if winnable { 1.0 } else { 0.0 } + safety(&s))
                         })
                         .collect::<Vec<_>>()
                 })
@@ -167,8 +179,9 @@ pub fn evaluate(cs: &[Case], model: ModelKind, tu: &Tuning, threads: usize) -> S
         handles.into_iter().flat_map(|h| h.join().unwrap()).collect()
     });
     let passed = results.iter().filter(|r| r.0).count();
-    let cost = results.iter().map(|(p, c)| (if *p { 0.0 } else { 1.0 }) + 0.15 * c).sum::<f64>() / cs.len() as f64;
-    Score { passed, n: cs.len(), cost }
+    let winnable = results.iter().filter(|r| r.1).count();
+    let cost = results.iter().map(|(p, w, c)| (if *p || !*w { 0.0 } else { 1.0 }) + 0.15 * c).sum::<f64>() / cs.len() as f64;
+    Score { passed, n: cs.len(), winnable, cost }
 }
 
 /// Step response of one inner loop.

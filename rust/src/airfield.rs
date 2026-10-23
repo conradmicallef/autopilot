@@ -212,7 +212,8 @@ pub fn normal_procedure(circuit: &CircuitSpec, runway_length: f64) -> Procedure 
         hold_brakes: false,
         vapp: circuit.vapp,
         approach_angle: circuit.approach_angle,
-        aim_point: (runway_length / 4.0).min(250.0),
+        // aim near the numbers: the hold-off floats the touchdown on into the first third
+        aim_point: (runway_length / 8.0).min(150.0),
         flare_floor: 0.4,
         flare_lead: 2.7,
         brake_delay: 2.0,
