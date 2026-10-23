@@ -1,0 +1,219 @@
+<title>Circuit Autopilot Sim</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@500;600;700&family=Atkinson+Hyperlegible:wght@400;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap">
+<style>
+/* Layout: a VFR chart-paper workspace (map + profile) beside a dark glass instrument stack (FMA, ADI, readouts). */
+:root {
+  --paper: #f2f4ee; --panel: #e6eae2; --ink: #1c2a2d; --muted: #5a6866; --line: #c6cfc7;
+  --route: #a8236f; --runway: #3b4548; --rwmark: #f2f4ee;
+  --ok: #2c7a4b; --bad: #b3342a; --pending: #7b8483;
+  --ph-ground: #7d8584; --ph-climb: #2c7a6a; --ph-xwind: #3567a8; --ph-down: #6f52b0; --ph-base: #b56f12; --ph-final: #c23f2b; --ph-flare: #4b5556; --ph-ga: #a8740a; --ph-eo: #b0263f;
+  --glass: #0f1719; --glass-2: #172326; --glass-line: #2a3a3e; --glass-ink: #d7e3df; --glass-muted: #7f9590;
+  --fma-green: #5be38a; --fma-cyan: #59d5e8; --fma-white: #eef4f2; --fma-amber: #f2b33d;
+  --f-display: "Barlow Condensed", "Arial Narrow", "Roboto Condensed", sans-serif;
+  --f-body: "Atkinson Hyperlegible", "Segoe UI", system-ui, sans-serif;
+  --f-mono: "IBM Plex Mono", ui-monospace, "SFMono-Regular", Menlo, monospace;
+  --r: 6px;
+}
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) {
+  --paper: #111a1c; --panel: #172225; --ink: #e2ebe7; --muted: #8d9c99; --line: #2a383b;
+  --route: #e15ba9; --runway: #c3ccc9; --rwmark: #111a1c;
+  --ok: #5cc286; --bad: #f0766a; --pending: #7e8b89;
+  --ph-ground: #8d9796; --ph-climb: #45b39c; --ph-xwind: #6b9be0; --ph-down: #a38ae6; --ph-base: #e3a043; --ph-final: #f0705b; --ph-flare: #b5c0bf; --ph-ga: #f2b33d; --ph-eo: #ff6f86;
+  --glass: #0a1012; --glass-2: #111b1e; --glass-line: #253438;
+  color-scheme: dark; } }
+:root[data-theme="dark"] {
+  --paper: #111a1c; --panel: #172225; --ink: #e2ebe7; --muted: #8d9c99; --line: #2a383b;
+  --route: #e15ba9; --runway: #c3ccc9; --rwmark: #111a1c;
+  --ok: #5cc286; --bad: #f0766a; --pending: #7e8b89;
+  --ph-ground: #8d9796; --ph-climb: #45b39c; --ph-xwind: #6b9be0; --ph-down: #a38ae6; --ph-base: #e3a043; --ph-final: #f0705b; --ph-flare: #b5c0bf; --ph-ga: #f2b33d; --ph-eo: #ff6f86;
+  --glass: #0a1012; --glass-2: #111b1e; --glass-line: #253438;
+  color-scheme: dark; }
+
+* { box-sizing: border-box; }
+body { background: var(--paper); color: var(--ink); font-family: var(--f-body); font-size: 15px; line-height: 1.45;
+  padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px)); padding-block: 18px 28px; }
+.wrap { max-width: 1240px; margin: 0 auto; display: flex; flex-direction: column; gap: 14px; }
+h1 { font-family: var(--f-display); font-weight: 700; font-size: 2rem; letter-spacing: 0.01em; margin: 0; line-height: 1; text-wrap: balance; }
+.sub { color: var(--muted); font-size: 0.9rem; margin-top: 4px; }
+.label { font-family: var(--f-display); font-weight: 600; text-transform: uppercase; letter-spacing: 0.08em; font-size: 0.78rem; color: var(--muted); }
+
+header { display: flex; flex-wrap: wrap; gap: 14px 24px; align-items: end; justify-content: space-between; }
+.controls { display: flex; flex-wrap: wrap; gap: 10px 16px; align-items: center; }
+.group { display: flex; align-items: center; gap: 8px; }
+button { font: 600 0.82rem/1 var(--f-display); text-transform: uppercase; letter-spacing: 0.08em; color: var(--ink);
+  background: var(--panel); border: 1px solid var(--line); border-radius: var(--r); padding: 9px 12px; cursor: pointer; min-height: 36px; }
+button:hover { border-color: var(--muted); }
+button:focus-visible, input:focus-visible { outline: 2px solid var(--route); outline-offset: 2px; }
+button.primary { background: var(--ink); color: var(--paper); border-color: var(--ink); min-width: 92px; }
+.seg { display: inline-flex; border: 1px solid var(--line); border-radius: var(--r); overflow: hidden; }
+.seg button { border: 0; border-radius: 0; background: transparent; padding: 9px 10px; font-family: var(--f-mono); text-transform: none; letter-spacing: 0; font-weight: 500; }
+.seg button + button { border-left: 1px solid var(--line); }
+.seg button[aria-pressed="true"] { background: var(--ink); color: var(--paper); }
+input[type=range] { width: 110px; accent-color: var(--route); }
+.val { font-family: var(--f-mono); font-size: 0.85rem; min-width: 5.2ch; font-variant-numeric: tabular-nums; }
+label.chk { display: flex; align-items: center; gap: 6px; font-size: 0.9rem; cursor: pointer; }
+
+.phases { display: flex; flex-wrap: wrap; gap: 6px; }
+.phase { font: 600 0.74rem/1 var(--f-display); letter-spacing: 0.07em; text-transform: uppercase; padding: 6px 8px; border-radius: 4px;
+  border: 1px solid var(--line); color: var(--muted); display: flex; gap: 6px; align-items: center; }
+.phase i { width: 8px; height: 8px; border-radius: 50%; background: var(--c); opacity: 0.35; }
+.phase.done { color: var(--ink); }
+.phase.done i { opacity: 1; }
+.phase.now { color: var(--ink); border-color: var(--c); box-shadow: inset 0 0 0 1px var(--c); }
+.phase.now i { opacity: 1; animation: blink 1s steps(2) infinite; }
+.phase.ga { border-style: dashed; }
+@keyframes blink { 50% { opacity: 0.25; } }
+@media (prefers-reduced-motion: reduce) { .phase.now i { animation: none; } }
+
+.main { display: grid; grid-template-columns: minmax(0, 1fr) 330px; gap: 14px; align-items: start; }
+.lower { display: grid; grid-template-columns: minmax(0, 1fr) 330px; gap: 14px; align-items: start; }
+@media (max-width: 900px) { .main, .lower { grid-template-columns: minmax(0, 1fr); } }
+.sheet { border: 1px solid var(--line); border-radius: var(--r); background: var(--paper); position: relative; min-width: 0; }
+.sheet-head { display: flex; justify-content: space-between; align-items: baseline; gap: 10px; padding: 10px 12px 0; flex-wrap: wrap; }
+.sheet-head .hint { font-size: 0.8rem; color: var(--muted); }
+canvas { display: block; width: 100%; }
+#map { aspect-ratio: 16 / 9.5; max-width: 100%; }
+@media (max-width: 600px) { #map { aspect-ratio: 4 / 3.4; } }
+#prof { height: 260px; }
+
+/* Instrument stack: always dark glass, like a panel */
+.glass { background: var(--glass); color: var(--glass-ink); border-radius: 10px; padding: 12px; display: flex; flex-direction: column; gap: 12px;
+  border: 1px solid var(--glass-line); }
+.fma { display: grid; grid-template-columns: repeat(3, 1fr); border: 1px solid var(--glass-line); border-radius: 4px; overflow: hidden; }
+.fma div { padding: 7px 6px 6px; text-align: center; font: 600 0.95rem/1.1 var(--f-mono); }
+.fma div + div { border-left: 1px solid var(--glass-line); }
+.fma small { display: block; font: 600 0.62rem/1 var(--f-display); letter-spacing: 0.1em; color: var(--glass-muted); margin-bottom: 4px; }
+#fmaThr { color: var(--fma-white); } #fmaVert { color: var(--fma-green); } #fmaLat { color: var(--fma-green); }
+#fmaVert.amber, .phaseNow div.amber { color: var(--fma-amber); }
+.phaseNow { font: 700 1.5rem/1 var(--f-display); letter-spacing: 0.05em; color: var(--fma-cyan); display: flex; justify-content: space-between; align-items: baseline; }
+.phaseNow span { font: 500 0.85rem var(--f-mono); color: var(--glass-muted); }
+.adiRow { display: grid; grid-template-columns: 150px 1fr; gap: 12px; align-items: center; }
+#adi { width: 150px; height: 150px; border-radius: 50%; }
+.read { display: grid; grid-template-columns: 1fr 1fr; gap: 8px 10px; }
+.read div { display: flex; flex-direction: column; }
+.read b { font: 600 0.62rem/1 var(--f-display); letter-spacing: 0.1em; color: var(--glass-muted); text-transform: uppercase; }
+.read span { font: 500 1.15rem/1.25 var(--f-mono); font-variant-numeric: tabular-nums; color: var(--fma-white); }
+.read span em { font-style: normal; font-size: 0.7rem; color: var(--glass-muted); margin-left: 3px; }
+.bars { display: grid; grid-template-columns: auto 1fr auto; gap: 6px 8px; align-items: center; font: 0.75rem var(--f-mono); color: var(--glass-muted); }
+.bar { height: 6px; background: var(--glass-2); border-radius: 3px; overflow: hidden; }
+.bar i { display: block; height: 100%; background: var(--fma-green); width: 0; }
+.warn { color: var(--fma-amber); font: 600 0.8rem var(--f-mono); min-height: 1em; }
+.reachRow { display: flex; align-items: baseline; gap: 8px; font: 0.75rem var(--f-mono); color: var(--glass-muted); border-top: 1px solid var(--glass-line); padding-top: 8px; }
+.reachRow b { font: 600 0.9rem var(--f-mono); color: var(--glass-ink); }
+.reachRow b.ok { color: var(--fma-green); } .reachRow b.no { color: var(--fma-amber); }
+.reachRow em { font-style: normal; margin-left: auto; }
+
+.card { border: 1px solid var(--line); border-radius: var(--r); padding: 12px; display: flex; flex-direction: column; gap: 10px; min-width: 0; }
+.crit { display: grid; grid-template-columns: 1fr auto; gap: 2px 10px; padding: 8px 0; border-top: 1px solid var(--line); align-items: center; }
+.crit:first-of-type { border-top: 0; padding-top: 2px; }
+.crit .k { font-weight: 700; font-size: 0.92rem; }
+.crit .c { font-size: 0.78rem; color: var(--muted); grid-column: 1; }
+.crit .v { font-family: var(--f-mono); font-size: 0.85rem; grid-column: 1; }
+.chip { grid-row: 1 / span 3; grid-column: 2; font: 700 0.72rem/1 var(--f-display); letter-spacing: 0.1em; text-transform: uppercase; padding: 5px 8px; border-radius: 3px;
+  border: 1px solid currentColor; color: var(--pending); }
+.chip.ok { color: var(--ok); } .chip.bad { color: var(--bad); } .chip.info { color: var(--muted); border-style: dashed; }
+.verdict { font: 700 1.1rem/1.1 var(--f-display); letter-spacing: 0.04em; text-transform: uppercase; }
+.log { font-family: var(--f-mono); font-size: 0.78rem; max-height: 220px; overflow: auto; display: grid; grid-template-columns: auto 1fr auto auto; gap: 3px 10px;
+  font-variant-numeric: tabular-nums; }
+.log .ph { font-family: var(--f-display); font-weight: 600; letter-spacing: 0.05em; font-size: 0.82rem; }
+.log .ph small { display: block; font-family: var(--f-body); font-weight: 400; letter-spacing: 0; font-size: 0.74rem; color: var(--muted); }
+.log .mut.l { text-align: left; }
+button:disabled { opacity: 0.4; cursor: not-allowed; }
+button.ga-btn { border-color: var(--ph-ga); color: var(--ph-ga); }
+button.eo-btn { border-color: var(--ph-eo); color: var(--ph-eo); }
+#fmaThr.red { color: #ff6b6b; }
+.log .mut { color: var(--muted); text-align: right; }
+.note { font-size: 0.85rem; color: var(--muted); max-width: 70ch; }
+</style>
+
+<div class="wrap">
+  <header>
+    <div>
+      <h1>Circuit Autopilot Sim</h1>
+      <div class="sub">Runway 09 · 1,200 m · left-hand circuit at 1,000 ft · C172-class point-mass model at 50 Hz</div>
+    </div>
+    <div class="controls">
+      <div class="group">
+        <button class="primary" id="run" type="button">Pause</button>
+        <button id="reset" type="button">Reset</button>
+        <button id="ga" class="ga-btn" type="button" disabled title="Available on base, final and flare">Go around</button>
+        <button id="eng" class="eo-btn" type="button">Fail engine</button>
+      </div>
+      <div class="group"><span class="label">Circuit</span>
+        <div class="seg" id="profile" role="group" aria-label="Circuit profile">
+          <button type="button" data-c="high" aria-pressed="true" title="Hold 1,000 ft as long as possible, tighter pattern, 5.5° approach">High</button><button type="button" data-c="standard" aria-pressed="false" title="Descend abeam the threshold, 3° approach">Standard</button>
+        </div>
+      </div>
+      <div class="group"><span class="label">Speed</span>
+        <div class="seg" id="warp" role="group" aria-label="Simulation speed">
+          <button type="button" data-w="1" aria-pressed="false">1×</button><button type="button" data-w="2" aria-pressed="false">2×</button><button type="button" data-w="5" aria-pressed="true">5×</button><button type="button" data-w="10" aria-pressed="false">10×</button>
+        </div>
+      </div>
+      <div class="group"><span class="label">Wind from</span>
+        <input type="range" id="wdir" min="0" max="350" step="10" value="270" aria-label="Wind direction"><span class="val" id="wdirV">270°</span></div>
+      <div class="group"><span class="label">Speed</span>
+        <input type="range" id="wspd" min="0" max="25" step="1" value="8" aria-label="Wind speed"><span class="val" id="wspdV">8 kt</span></div>
+      <label class="chk"><input type="checkbox" id="gusts"> Gusts</label>
+    </div>
+  </header>
+
+  <div class="phases" id="phases" aria-label="Autopilot phase sequence"></div>
+
+  <div class="main">
+    <section class="sheet">
+      <div class="sheet-head"><span class="label">Plan view</span><span class="hint">Dashed: planned circuit · Solid: flown track, coloured by phase</span></div>
+      <canvas id="map"></canvas>
+    </section>
+    <aside class="glass" aria-label="Instruments">
+      <div class="phaseNow"><div id="phaseNow" class="">TAKEOFF ROLL</div><span id="clock">00:00</span></div>
+      <div class="fma">
+        <div><small>THR</small><span id="fmaThr">TOGA</span></div>
+        <div><small>VERT</small><span id="fmaVert">TO</span></div>
+        <div><small>LAT</small><span id="fmaLat">RWY</span></div>
+      </div>
+      <div class="adiRow">
+        <canvas id="adi" width="150" height="150"></canvas>
+        <div class="read">
+          <div><b>IAS</b><span id="rIas">0<em>kt</em></span></div>
+          <div><b>GS</b><span id="rGs">0<em>kt</em></span></div>
+          <div><b>ALT</b><span id="rAlt">0<em>ft</em></span></div>
+          <div><b>V/S</b><span id="rVs">0<em>fpm</em></span></div>
+          <div><b>HDG</b><span id="rHdg">090<em>°</em></span></div>
+          <div><b>TRK</b><span id="rTrk">090<em>°</em></span></div>
+          <div><b>Slip</b><span id="rSlip">0.0<em>°</em></span></div>
+          <div><b>Flaps</b><span id="rFlaps">10<em>°</em></span></div>
+        </div>
+      </div>
+      <div class="bars">
+        <span>THR</span><div class="bar"><i id="bThr"></i></div><span id="vThr">0%</span>
+        <span>AOA</span><div class="bar"><i id="bAoa"></i></div><span id="vAoa">0.0°</span>
+      </div>
+      <div class="reachRow"><span>GLIDE REACH</span><b id="reach">ON GROUND</b><em id="reachPct"></em></div>
+      <div class="warn" id="warn"></div>
+    </aside>
+  </div>
+
+  <div class="lower">
+    <section class="sheet">
+      <div class="sheet-head"><span class="label">Vertical profile &amp; airspeed</span><span class="hint">Altitude (ft) and IAS (kt) against time · strip: runway within glide reach</span></div>
+      <canvas id="prof"></canvas>
+    </section>
+    <div style="display:flex;flex-direction:column;gap:14px;min-width:0">
+      <section class="card" aria-live="polite">
+        <div style="display:flex;justify-content:space-between;align-items:baseline;gap:8px"><span class="label">Landing check</span><span class="verdict" id="verdict">In flight</span></div>
+        <div id="crit"></div>
+      </section>
+      <section class="card">
+        <span class="label">Mode log</span>
+        <div class="log" id="log"></div>
+      </section>
+    </div>
+  </div>
+  <p class="note">The autopilot nests three layers: attitude hold (pitch and bank), flight-path, speed and track loops, and a mode manager that steps through the circuit. Climb flies pitch-for-speed at full power; the approach flies pitch-for-glidepath with throttle on speed. On final below 300 ft it monitors a stabilised-approach gate (speed −5/+10 kt, glidepath ±0.7°, centreline ±30 m, sink under 1,000 fpm, bank under 15°) and goes around if any is breached for 2 seconds, or if the flare floats past the first third of the runway. In a crosswind it flies the approach crabbed, then below 60 ft it straightens up: rudder swings the nose onto the runway heading while the into-wind wing goes down to stop the drift, so HDG and TRK match at touchdown. Every command is rate-limited (pitch 3°/s, bank 8°/s, throttle 30%/s, flaps 3°/s), so mode changes, including a go-around, ramp rather than step. The High circuit (default) holds 1,000 ft on a tighter downwind until the 5.5° approach path meets it, so the runway stays within power-off gliding reach for much more of the flight; the GLIDE REACH readout and the strip under the altitude trace show when a return would make it, using either runway direction. Press Fail engine at any point: on the runway it rejects the take-off; below 700 ft after take-off it lands straight ahead with no turn-back; higher up it plans a power-off return to runway 09 or 27, whichever leaves more height in hand (base key point, intercept, aim 300 m in) from height, speed, wind and glide ratio, re-checking every second, and lands ahead if the runway is out of reach. On a power-off final it adds flap in stages, forward-slips if still high, and straightens up for touchdown. Raise the crosswind, turn on gusts or press Go around to stress it.</p>
+</div>
+
+<script>
+/*BUNDLE*/
+</script>
