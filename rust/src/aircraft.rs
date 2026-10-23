@@ -10,7 +10,7 @@
 use crate::atmosphere::Wind;
 use crate::c172p;
 use crate::sixdof::SixDof;
-use crate::units::{clamp, slew, wrap_pi, Vec2, D2R, G, PI, RHO};
+use crate::units::{clamp, slew, wrap_pi, Vec2, D2R, G, KT, PI, RHO};
 use serde::Serialize;
 
 /// Static description of an airframe (shared by both models).
@@ -77,6 +77,8 @@ pub struct Commands {
     pub no_touchdown: bool,
     /// Flare: pitch may change at `FLARE_PITCH_RATE` instead of the normal rate, to arrest the sink in time.
     pub flare: bool,
+    /// Pitch slew limit for this command, rad/s, when not the default (the power-off glide uses a gentler one).
+    pub pitch_rate: Option<f64>,
 }
 
 /// Pitch slew allowed in the flare (the normal limit stays everywhere else, including go-arounds).
@@ -115,7 +117,8 @@ impl Default for CommandShaper {
 
 impl CommandShaper {
     pub fn shape(&mut self, c: &Commands, dt: f64) {
-        let pitch_rate = if c.flare { self.rates.theta.max(FLARE_PITCH_RATE) } else { self.rates.theta };
+        let base = c.pitch_rate.unwrap_or(self.rates.theta);
+        let pitch_rate = if c.flare { base.max(FLARE_PITCH_RATE) } else { base };
         self.theta_rate = (slew(self.theta, c.theta, pitch_rate, dt) - self.theta) / dt;
         self.theta += self.theta_rate * dt;
         self.phi = slew(self.phi, c.phi, self.rates.phi, dt);
@@ -191,6 +194,49 @@ pub struct Aircraft {
     pub spec: AircraftSpec,
     pub model: ModelKind,
     pub six: Option<Box<SixDof>>,
+    /// Trimmed power-off glide ratio by airspeed and flap (6DOF only), for the glide planner.
+    pub glide_table: Option<GlideTable>,
+}
+
+/// Power-off glide ratio of the 6DOF model from exact trims (elevator trim drag and the windmilling
+/// propeller included), on a grid of airspeed × flap; read by bilinear interpolation.
+#[derive(Clone, Debug)]
+pub struct GlideTable {
+    v0: f64,
+    dv: f64,
+    ld: [[f64; GLIDE_NV]; 4],
+}
+
+const GLIDE_NV: usize = 28;
+const GLIDE_FLAPS: [f64; 4] = [0.0, 10.0, 20.0, 30.0];
+
+impl GlideTable {
+    pub fn build(six: &SixDof) -> Self {
+        let (v0, dv) = (48.0 * KT, 2.0 * KT);
+        let mut ld = [[0.0; GLIDE_NV]; 4];
+        for (fi, &f) in GLIDE_FLAPS.iter().enumerate() {
+            for i in 0..GLIDE_NV {
+                ld[fi][i] = six.glide_trim(v0 + dv * i as f64, f).unwrap_or(0.0);
+            }
+            // below the lowest trimmable speed the glide is worse than anywhere above it: hold the first
+            // trimmed value scaled down, so the table stays monotone into the stall
+            let first = (0..GLIDE_NV).find(|&i| ld[fi][i] > 1.0).unwrap_or(0);
+            for i in 0..first {
+                ld[fi][i] = ld[fi][first] * 0.8;
+            }
+        }
+        GlideTable { v0, dv, ld }
+    }
+    pub fn ratio(&self, v: f64, flap: f64) -> f64 {
+        let fv = clamp((v - self.v0) / self.dv, 0.0, (GLIDE_NV - 1) as f64);
+        let i = (fv.floor() as usize).min(GLIDE_NV - 2);
+        let tv = fv - i as f64;
+        let ff = clamp(flap / 10.0, 0.0, 3.0);
+        let j = (ff.floor() as usize).min(2);
+        let tf = ff - j as f64;
+        let at = |j: usize| self.ld[j][i] * (1.0 - tv) + self.ld[j][i + 1] * tv;
+        at(j) * (1.0 - tf) + at(j + 1) * tf
+    }
 }
 
 impl Aircraft {
@@ -221,9 +267,11 @@ impl Aircraft {
             spec,
             model,
             six: None,
+            glide_table: None,
         };
         if model == ModelKind::SixDof {
             let six = SixDof::on_runway(&ac.spec);
+            ac.glide_table = Some(GlideTable::build(&six));
             ac.six = Some(Box::new(six));
             ac.sync_from_six();
         }
@@ -319,7 +367,11 @@ impl Aircraft {
         (2.0 * self.spec.mass * G / (RHO * self.spec.wing_area * cl_max)).sqrt()
     }
 
+    /// Power-off glide ratio at airspeed `v` and `flap_pos`: the trimmed 6DOF glide where there is one.
     pub fn glide_ratio(&self, v: f64, flap_pos: f64) -> f64 {
+        if let Some(t) = &self.glide_table {
+            return t.ratio(v, flap_pos);
+        }
         let s = &self.spec;
         let cl = (s.mass * G) / (0.5 * RHO * v * v * s.wing_area);
         let a = c172p::alpha_for_cl(cl, flap_pos);

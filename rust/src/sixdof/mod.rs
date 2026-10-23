@@ -301,6 +301,55 @@ impl SixDof {
     }
 
     /// Time derivative of the state, plus diagnostics.
+    /// Steady wings-level power-off glide (engine failed, propeller windmilling) at airspeed `v` and
+    /// `flap`: solves α, elevator and flight-path angle for zero u̇, ẇ, q̇, so the elevator's trim drag
+    /// is included. Returns the glide ratio, or None where no trim exists (below the stall).
+    pub fn glide_trim(&self, v: f64, flap: f64) -> Option<f64> {
+        let res = |z: [f64; 3]| -> [f64; 3] {
+            let mut x = [0.0; N_STATE];
+            x[2] = -2000.0;
+            x[3] = v * z[0].cos();
+            x[5] = v * z[0].sin();
+            x[6..10].copy_from_slice(&quat_from_euler(0.0, z[0] + z[2], 0.0));
+            let u = Controls { de: z[1], thr: 0.0, flap, engine_failed: true, ..Default::default() };
+            let (d, _) = self.derivs(&x, &u, [0.0; 3]);
+            [d[3], d[5], d[11]]
+        };
+        let det = |a: [[f64; 3]; 3]| {
+            a[0][0] * (a[1][1] * a[2][2] - a[1][2] * a[2][1]) - a[0][1] * (a[1][0] * a[2][2] - a[1][2] * a[2][0])
+                + a[0][2] * (a[1][0] * a[2][1] - a[1][1] * a[2][0])
+        };
+        let mut z = [0.08, -0.05, -0.1];
+        for _ in 0..40 {
+            let r = res(z);
+            if r.iter().map(|x| x.abs()).sum::<f64>() < 1e-9 {
+                break;
+            }
+            let mut j = [[0.0; 3]; 3];
+            for k in 0..3 {
+                let mut zp = z;
+                zp[k] += 1e-6;
+                let rp = res(zp);
+                for i in 0..3 {
+                    j[i][k] = (rp[i] - r[i]) / 1e-6;
+                }
+            }
+            let d0 = det(j);
+            if d0.abs() < 1e-12 {
+                return None;
+            }
+            for k in 0..3 {
+                let mut a = j;
+                for i in 0..3 {
+                    a[i][k] = -r[i];
+                }
+                z[k] += det(a) / d0;
+            }
+        }
+        let ok = res(z).iter().map(|x| x.abs()).sum::<f64>() < 1e-6 && z[2] < 0.0 && z[0] < 0.25;
+        ok.then(|| 1.0 / (-z[2]).tan())
+    }
+
     pub fn derivs(&self, s: &State, u: &Controls, wind_ned: V3) -> (State, Diag) {
         let prm = &self.prm;
         let spec = &self.spec;

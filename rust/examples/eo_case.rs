@@ -18,7 +18,7 @@ fn main() {
             let ac = &s.aircraft;
             println!("failure at x {:.0} y {:.0} h {:.0} ft track {:.0}°", ac.x, ac.y, ac.h / 0.3048, circuitsim::units::heading_deg(ac.track(&s.wind)));
             for e in s.autopilot.planner.ends {
-                let g = s.autopilot.planner.plan_for(ac, &s.wind, &e);
+                let g = s.autopilot.planner.plan_for(ac, s.autopilot.gust.mean_wind(), &e);
                 println!("  end {}: reachable {} ip {:.0} required {:.0} m available {:.0} m surplus {:.0}", e.name, g.reachable, g.ip_distance, g.required, g.available, g.surplus);
             }
         }

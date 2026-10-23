@@ -30,10 +30,9 @@ pub struct FcsGains {
     pub v_ref: f64,
 }
 
-impl Default for FcsGains {
-    /// The tuned values (`crate::tuning::Tuning::default`), which `Simulation` also applies.
-    fn default() -> Self {
-        let t = crate::tuning::Tuning::default();
+impl FcsGains {
+    /// Inner-loop gains from a parameter set (the tuned ones are `Tuning::default`).
+    pub fn from_tuning(t: &crate::tuning::Tuning) -> Self {
         FcsGains {
             k_theta: t.k_theta,
             k_q: t.k_q,
@@ -46,6 +45,12 @@ impl Default for FcsGains {
             k_r: t.k_r,
             v_ref: 30.0,
         }
+    }
+}
+
+impl Default for FcsGains {
+    fn default() -> Self {
+        Self::from_tuning(&crate::tuning::Tuning::default())
     }
 }
 

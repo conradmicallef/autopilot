@@ -68,6 +68,21 @@ impl Wind {
         self.v.y = ws * to_angle.sin() + self.gust.y;
     }
 
+    /// A steady wind with vector `v` (no gusts): what the autopilot believes, built from its estimate.
+    pub fn steady(v: Vec2) -> Self {
+        let speed = v.x.hypot(v.y);
+        // the direction the wind blows from, degrees true (math angle of the vector + 180°, to compass)
+        let from = (90.0 - (v.y.atan2(v.x) / D2R + 180.0)).rem_euclid(360.0);
+        Wind {
+            settings: WindSettings { from_deg: from, speed_kt: speed / KT, gusts: false },
+            gust_tau: 3.0,
+            gust_sigma: 0.0,
+            gust: Vec2::default(),
+            v,
+            rng: Rng::new(1.0),
+        }
+    }
+
     /// Wind component along a track angle (positive = tailwind).
     pub fn along(&self, psi: f64) -> f64 {
         self.v.x * psi.cos() + self.v.y * psi.sin()

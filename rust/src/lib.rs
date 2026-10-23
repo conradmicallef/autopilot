@@ -12,6 +12,7 @@ pub mod autotune;
 pub mod autopilot;
 pub mod c172p;
 pub mod control;
+pub mod dubins;
 pub mod emergency;
 pub mod jsonw;
 pub mod scenarios;

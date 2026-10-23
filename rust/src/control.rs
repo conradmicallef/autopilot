@@ -3,7 +3,7 @@
 
 use crate::aircraft::Aircraft;
 use crate::atmosphere::Wind;
-use crate::units::{clamp, wrap_pi, Point, D2R, G, PI};
+use crate::units::{clamp, wrap_pi, Point, Vec2, D2R, G, PI};
 
 /// Proportional-integral controller: out = i + kp·e, with a clamped integrator.
 #[derive(Clone, Debug)]
@@ -102,6 +102,10 @@ impl Default for FlightPathController {
 }
 
 impl FlightPathController {
+    /// Clear the integrator (a new climb from the runway starts from zero).
+    pub fn reset(&mut self) {
+        self.gamma_pi.i = 0.0;
+    }
     pub fn gamma(&mut self, ac: &Aircraft, g_cmd: f64, dt: f64) -> f64 {
         let err = g_cmd - ac.gamma;
         let p = &mut self.gamma_pi;
@@ -165,31 +169,49 @@ impl Default for SpeedOnPitch {
     }
 }
 
-/// Turbulence estimate from the measured wind, as a real autopilot gets it: ground velocity (GPS)
-/// minus air velocity (airspeed along the flight path). Each wind component is high-passed (4 s)
-/// and the spread of what remains is tracked (6 s), so a steady wind reads zero and gusts don't.
+/// Wind and turbulence from what an installation can measure: ground velocity (GPS) minus air velocity
+/// (airspeed along the nose heading, as a compass gives it, with no sideslip sensor). Two outputs:
+/// * the mean wind, low-passed over `MEAN_TAU`, which the planner and the wind corrections use;
+/// * the gust spread: each component high-passed (4 s) and its spread tracked (6 s), so a steady wind
+///   reads zero and gusts don't.
+/// While a sideslip is commanded (a forward slip, the de-crab) the nose does not point along the air path,
+/// so neither estimate is updated.
 #[derive(Clone, Debug, Default)]
 pub struct GustEstimator {
     w_lp: [f64; 2],
+    mean: [f64; 2],
     var: f64,
     init: bool,
 }
 
+/// Mean-wind time constant, s.
+const MEAN_TAU: f64 = 15.0;
+
 impl GustEstimator {
-    pub fn update(&mut self, ac: &Aircraft, wind: &Wind, dt: f64) {
+    pub fn update(&mut self, ac: &Aircraft, wind: &Wind, dt: f64, slipping: bool) {
+        if slipping {
+            return;
+        }
         let gv = ac.ground_velocity(wind);
         let ha = ac.v * ac.gamma.cos();
-        let w = [gv.x - ha * ac.psi.cos(), gv.y - ha * ac.psi.sin()];
+        let nose = ac.nose_heading();
+        let w = [gv.x - ha * nose.cos(), gv.y - ha * nose.sin()];
         if !self.init {
             self.w_lp = w;
+            self.mean = w;
             self.init = true;
         }
         let mut e2 = 0.0;
         for i in 0..2 {
             self.w_lp[i] += (w[i] - self.w_lp[i]) * dt / 4.0;
+            self.mean[i] += (w[i] - self.mean[i]) * dt / MEAN_TAU;
             e2 += (w[i] - self.w_lp[i]).powi(2);
         }
         self.var += (0.5 * e2 - self.var) * dt / 6.0;
+    }
+    /// Estimated mean wind (the air's velocity over the ground), m/s; zero before the first airborne sample.
+    pub fn mean_wind(&self) -> Vec2 {
+        Vec2 { x: self.mean[0], y: self.mean[1] }
     }
     /// Standard deviation of the gusts per horizontal axis, m/s (after a 0.2 m/s dead band).
     pub fn sigma(&self) -> f64 {

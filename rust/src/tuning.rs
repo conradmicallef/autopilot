@@ -38,12 +38,11 @@ pub struct Tuning {
     pub eo_margin_height: f64,
     /// Clean power-off glide speed, kt.
     pub vbg_kt: f64,
-    /// Base key beyond the turn-onto-final reach, m.
-    pub key_margin: f64,
-    /// Bank for power-off turns of more than 60°, deg.
+    /// Bank for power-off turns, deg: both the turn the glide planner costs and the one flown.
     pub eo_turn_bank: f64,
-    /// Height kept in hand for a stretch to the runway, m.
-    pub stretch_margin: f64,
+    /// Power-off plan reserve: height in hand, as a fraction of the path's need, kept before the plan
+    /// optimises its aim point.
+    pub eo_reserve: f64,
 }
 
 impl Default for Tuning {
@@ -69,10 +68,11 @@ impl Default for Tuning {
             lull_vs: 1.34,
             eo_margin_factor: 1.04,
             eo_margin_height: 5.0,
-            vbg_kt: 68.62,
-            key_margin: 261.8,
+            // the trimmed model's glide is flat (L/D 8.4–9.0 over 68–82 kt, best at 76): 70 kt gives 8.7 and
+            // costs less speed to reach from the 65 kt climb, with a smaller turn radius
+            vbg_kt: 70.0,
             eo_turn_bank: 45.0,
-            stretch_margin: 5.0,
+            eo_reserve: 0.2,
         }
     }
 }
@@ -88,7 +88,7 @@ pub struct Dim {
     pub hi: f64,
 }
 
-pub const NT: usize = 20;
+pub const NT: usize = 19;
 
 pub const DIMS: [Dim; NT] = [
     Dim { name: "k_theta", log: true, scale: 0.35, lo: 0.8, hi: 5.0 },
@@ -107,10 +107,9 @@ pub const DIMS: [Dim; NT] = [
     Dim { name: "lull_vs", log: false, scale: 0.05, lo: 1.15, hi: 1.45 },
     Dim { name: "eo_margin_factor", log: false, scale: 0.05, lo: 0.95, hi: 1.3 },
     Dim { name: "eo_margin_height", log: false, scale: 8.0, lo: 5.0, hi: 60.0 },
-    Dim { name: "vbg_kt", log: false, scale: 2.0, lo: 64.0, hi: 78.0 },
-    Dim { name: "key_margin", log: false, scale: 50.0, lo: 0.0, hi: 400.0 },
+    Dim { name: "vbg_kt", log: false, scale: 2.0, lo: 66.0, hi: 84.0 },
     Dim { name: "eo_turn_bank", log: false, scale: 4.0, lo: 25.0, hi: 45.0 },
-    Dim { name: "stretch_margin", log: false, scale: 8.0, lo: 5.0, hi: 50.0 },
+    Dim { name: "eo_reserve", log: false, scale: 0.1, lo: 0.1, hi: 0.8 },
 ];
 
 impl Tuning {
@@ -135,9 +134,8 @@ impl Tuning {
             eo_margin_factor: 1.1,
             eo_margin_height: 20.0,
             vbg_kt: 70.0,
-            key_margin: 150.0,
             eo_turn_bank: 45.0,
-            stretch_margin: 10.0,
+            eo_reserve: 0.3,
         }
     }
     /// Default parameters for a flight model.
@@ -166,9 +164,8 @@ impl Tuning {
             self.eo_margin_factor,
             self.eo_margin_height,
             self.vbg_kt,
-            self.key_margin,
             self.eo_turn_bank,
-            self.stretch_margin,
+            self.eo_reserve,
         ]
     }
     pub fn from_vec(v: &[f64; NT]) -> Self {
@@ -190,9 +187,8 @@ impl Tuning {
             eo_margin_factor: v[14],
             eo_margin_height: v[15],
             vbg_kt: v[16],
-            key_margin: v[17],
-            eo_turn_bank: v[18],
-            stretch_margin: v[19],
+            eo_turn_bank: v[17],
+            eo_reserve: v[18],
         }
     }
     /// The parameters at normalised search coordinates `z` around `base` (z = 0 is `base`), clamped to bounds.

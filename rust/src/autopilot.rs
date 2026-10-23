@@ -6,9 +6,10 @@ use crate::aircraft::{Aircraft, Commands};
 use crate::airfield::{normal_procedure, Circuit, Leg, Procedure, Runway};
 use crate::atmosphere::Wind;
 use crate::control::{AutoThrottle, FlightPathController, GustEstimator, SpeedOnPitch, TrackGuidance};
-use crate::emergency::{default_eo, GlideAssessment, GlidePlanner, RunwayEnd};
+use crate::dubins::{self, Follower, Motion};
+use crate::emergency::{self, EngineOutSpec, GlideAssessment, GlidePlanner, RunwayEnd};
 use crate::tuning::Tuning;
-use crate::units::{clamp, wrap_pi, Point, D2R, FT, G, KT, PI};
+use crate::units::{clamp, wrap_pi, Point, Vec2, D2R, FT, G, KT, PI};
 use serde::Serialize;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
@@ -173,40 +174,57 @@ impl StabilityMonitor {
 }
 
 
-/// Largest turn at the base key for which the turn cuts the corner (fly-by), rad.
-const KEY_CUT_MAX: f64 = 2.1;
-/// Largest centreline offset for starting or holding a slip, m.
-const SLIP_ALIGN_Y: f64 = 60.0;
 /// C172P flap limit speeds, KIAS: 10° flap, and beyond 10°.
 const VFE_10: f64 = 110.0;
 const VFE_FULL: f64 = 85.0;
 /// Bank limit: airspeed over the stall speed at the turn's load factor.
 const BANK_STALL_MARGIN: f64 = 1.2;
-/// No flap retraction below this height, ft.
-const RETRACT_FLOOR: f64 = 100.0;
 /// Bank always allowed, deg.
 const BANK_FLOOR: f64 = 15.0;
-/// Best-glide wind correction: fraction of the headwind above the dead band (kt) added to the speed.
-const VBG_HEAD_K: f64 = 0.0;
-const VBG_HEAD_DEADBAND: f64 = 5.0;
-/// Try a margin-free short final to any part of the runway before giving up for a field.
-const STRETCH: bool = true;
-/// Planned height surplus (m, after margins) above which flap 10 goes out on the way in (×2: flap 20).
-const EARLY_FLAP_SURPLUS: f64 = 100.0;
-/// Largest turn toward the wind for a field landing, deg.
-const FIELD_TURN_MAX: f64 = 90.0;
+/// Heights, ft: bank limited to 10° below LOW_BANK in the initial climb; near the ground below
+/// NEAR_GROUND (no pitching down in the climb, 10° bank on final).
+const LOW_BANK: f64 = 200.0;
+const NEAR_GROUND: f64 = 100.0;
+/// Power-off: no flap is raised below this height, ft (the sink while it comes up costs more than it saves).
+const RETRACT_FLOOR: f64 = 100.0;
 /// Lowest height for a forward slip, ft (below it the crosswind alignment law takes over).
 const SLIP_FLOOR: f64 = 100.0;
 /// Sink-rate gain of a full-rudder forward slip in this model (`examples/slip_test.rs`: ×1.25–1.3).
 const SLIP_SINK_GAIN: f64 = 1.25;
+/// Largest centreline offset and track error for a slip, m and deg.
+const SLIP_ALIGN_Y: f64 = 60.0;
+const SLIP_ALIGN_TRK: f64 = 15.0;
 /// Bank allowed for holding the centreline while slipping, deg.
 const SLIP_LINE_BANK: f64 = 6.0;
-const S_TURN_MIN_DIST: f64 = 500.0;
-const S_TURN_WIDTH: f64 = 150.0;
-/// S-turns start when the required gradient exceeds the full-flap glide by this factor.
-const S_TURN_RATIO: f64 = 1.4;
+/// Largest turn toward the wind for a field landing, deg.
+const FIELD_TURN_MAX: f64 = 90.0;
 /// Power-off centreline capture distance, as a fraction of the ground-speed turn radius.
 const LINE_CAPTURE_K: f64 = 0.8;
+/// A fresh power-off plan replaces the current one when it has this much more height in hand (counted
+/// up to `PLAN_KEEP`), m: re-planning mid-turn costs height, so only for a clear gain.
+const SWITCH_GAIN: f64 = 20.0;
+const PLAN_KEEP: f64 = 60.0;
+/// The power-off path is made afresh when the aircraft is this far off it, m.
+const PATH_OFF: f64 = 80.0;
+/// On a power-off final, go back to planning a longer path when even full drag lands this far beyond
+/// the farthest usable aim point (as a fraction of the distance), above `REPLAN_FLOOR` ft.
+const REPLAN_LONG: f64 = 0.25;
+const REPLAN_FLOOR: f64 = 400.0;
+
+/// The power-off drag ladder: flap settings, then a forward slip at flap 20, in order of glide gradient.
+/// The final picks the level whose glide lands nearest the aim point (never short of the nearest one).
+const LADDER: [(f64, bool); 5] = [(0.0, false), (10.0, false), (20.0, false), (20.0, true), (30.0, false)];
+
+/// A power-off path being followed: the Dubins path in the air mass, when and with which wind estimate it
+/// was made (the air-mass frame drifts with that wind from then on), and the plan it serves.
+#[derive(Clone, Debug)]
+struct EoPath {
+    follow: Follower,
+    t0: f64,
+    wind: Vec2,
+    end: &'static str,
+    fix: f64,
+}
 
 pub struct Autopilot {
     pub phase: Phase,
@@ -222,10 +240,11 @@ pub struct Autopilot {
     pub planner: GlidePlanner,
     pub glide_speed: SpeedOnPitch,
     eo_flaps: f64,
-    passed_base_key: bool,
+    /// Power-off drag ladder level (index into `LADDER`).
+    drag: usize,
+    /// The power-off path being followed (air-mass frame), when gliding to a final fix.
+    eo_path: Option<EoPath>,
     slip_side: f64,
-    /// S-turn direction on a high power-off final (+1 / −1 about the centreline, 0 = not weaving).
-    s_turn: f64,
     last_assess: f64,
     flare_k: f64,
     /// Turbulence seen in the airspeed: sizes the gust margin and the flare.
@@ -251,20 +270,19 @@ pub struct Autopilot {
 impl Autopilot {
     pub fn new(circuit: Circuit) -> Self {
         let p = normal_procedure(&circuit.spec, circuit.runway.length);
-        Self::with_procedure(circuit, p)
+        Self::with_procedure(circuit, p, Tuning::default())
     }
 
-    pub fn with_procedure(circuit: Circuit, procedure: Procedure) -> Self {
+    /// The one constructor: every tuned value (landing parameters, power-off planning) comes from `tune`.
+    pub fn with_procedure(circuit: Circuit, mut procedure: Procedure, tune: Tuning) -> Self {
+        procedure.flare_lead = if procedure.short_field { tune.flare_lead_short } else { tune.flare_lead };
         let stability = StabilityMonitor {
             unstable_for: 0.0,
             gates: default_gates(),
             runway: circuit.runway.clone(),
             vapp: procedure.vapp,
         };
-        // power-off aim point: well into the runway, but not past the first quarter of a short strip
-        let mut eo = default_eo();
-        eo.aim_point = eo.aim_point.min(0.25 * circuit.runway.length);
-        let planner = GlidePlanner::new(circuit.runway.clone(), eo);
+        let planner = GlidePlanner::new(circuit.runway.clone(), EngineOutSpec::new(&tune, circuit.runway.length));
         Autopilot {
             phase: Phase::TakeoffRoll,
             fma: Fma::new("TOGA", "TO", "RWY"),
@@ -278,13 +296,13 @@ impl Autopilot {
             planner,
             glide_speed: SpeedOnPitch::new(0.02, 0.01, -0.35, 0.1),
             eo_flaps: 0.0,
-            passed_base_key: false,
+            drag: 0,
+            eo_path: None,
             slip_side: 0.0,
-            s_turn: 0.0,
             last_assess: 0.0,
             flare_k: 0.28,
             gust: GustEstimator::default(),
-            tune: Tuning::default(),
+            tune,
             guidance: TrackGuidance::default(),
             path: FlightPathController::default(),
             auto_throttle: AutoThrottle::default(),
@@ -338,16 +356,20 @@ impl Autopilot {
     }
 
     /// Engine failure decision: on the ground → reject; low after take-off → land ahead (no turn-back);
-    /// otherwise return to whichever runway direction is reachable with margin, else land ahead.
-    pub fn fail_engine(&mut self, ac: &mut Aircraft, wind: &Wind) -> bool {
+    /// otherwise glide to whichever runway direction the planner reaches with margin; lined up on final,
+    /// go for the runway whatever the margin (landing ahead points the same way); else land ahead.
+    /// `wind` is only passed on to the estimator's frame: decisions use the estimated mean wind.
+    pub fn fail_engine(&mut self, ac: &Aircraft, _wind: &Wind) -> bool {
         if self.engine_out.is_some() || self.phase == Phase::Stopped || self.phase == Phase::Rollout {
             return false;
         }
-        ac.engine_failed = true;
-        ac.shaper.rates.theta = self.planner.spec.pitch_rate;
+        let est = Wind::steady(self.gust.mean_wind());
+        let wind = &est;
+        let w = wind.v;
         self.go_around_requested = false;
         let track = ac.track(wind);
-        self.glide = if ac.on_ground { None } else { Some(self.planner.plan(ac, wind, None)) };
+        let on_final = self.on_final_end(ac, wind, false);
+        self.glide = if ac.on_ground { None } else { Some(self.planner.plan(ac, w, None)) };
         let min_tb = self.planner.spec.min_turnback_height;
         let (plan, why) = if ac.on_ground {
             (EngineOutPlan::Reject, "On the runway: reject take-off".to_string())
@@ -356,17 +378,11 @@ impl Autopilot {
         } else if (self.phase == Phase::Climb || self.phase == Phase::GoAround) && ac.h < min_tb {
             (EngineOutPlan::LandAhead, "Below 700 ft: no turn-back".to_string())
         } else if self.glide.as_ref().unwrap().reachable {
-            (EngineOutPlan::Return, format!("Runway {} within glide range", self.glide.as_ref().unwrap().end.name))
-        } else if let Some(g) = STRETCH.then(|| self.planner.stretch(ac, wind, None)).flatten() {
-            let name = g.end.name;
-            self.glide = Some(g);
-            (EngineOutPlan::Return, format!("Stretching to runway {}: any part of it beats a field", name))
-        } else if let Some(e) = self.planner.ends.iter().copied().find(|e| {
-            ac.y.abs() < 100.0 && wrap_pi(track - e.heading).abs() < 30.0 * D2R && e.dir * (e.threshold - ac.x) > 0.0
-        }) {
-            // lined up on final: landing ahead and stretching for the runway are the same direction, so go
-            // for the runway (centreline, flap up for the flatter glide); short of it is the field ahead anyway
-            self.glide = Some(self.planner.plan_for(ac, wind, &e));
+            let g = self.glide.as_ref().unwrap();
+            let how = if g.aim < self.planner.spec.aim_point - 1.0 { format!(", aiming {} m in", g.aim.round()) } else { String::new() };
+            (EngineOutPlan::Return, format!("Runway {} within glide range{how}", g.end.name))
+        } else if let Some(e) = on_final {
+            self.glide = Some(self.planner.plan_for(ac, w, &e));
             (EngineOutPlan::Return, format!("On final: straight ahead for runway {}, flap up to stretch", e.name))
         } else {
             (EngineOutPlan::LandAhead, "Both runway directions beyond glide range".to_string())
@@ -376,21 +392,20 @@ impl Autopilot {
         self.log(ac, "ENGINE_FAILURE", Some(why));
         // start the glide loop at the expected best-glide path angle; the pitch slew does the rest
         self.glide_speed.engage(-1.0 / ac.glide_ratio(self.planner.spec.vbg, 0.0));
+        // flap: raised for the glide (the plan assumes it), kept as it is when already on final
         self.eo_flaps = 0.0;
+        self.drag = 0;
+        self.eo_path = None;
         self.last_assess = self.t;
-        self.passed_base_key = false;
-        let end = self.eo_end();
         match plan {
             EngineOutPlan::Reject => self.set_phase(ac, Phase::Rejected),
             EngineOutPlan::LandAhead => self.set_phase(ac, Phase::ForcedLanding),
             EngineOutPlan::Return => {
                 if self.phase == Phase::Flare {
                     // keep flaring
-                } else if ac.y.abs() < 100.0
-                    && wrap_pi(track - end.heading).abs() < 30.0 * D2R
-                    && self.planner.to_aim(ac.x, &end) > 0.0
-                {
+                } else if on_final.is_some_and(|e| e.name == self.eo_end().name) {
                     self.eo_flaps = (ac.flap_pos / 10.0).round() * 10.0;
+                    self.drag = LADDER.iter().rposition(|l| l.0 <= self.eo_flaps && !l.1).unwrap_or(0);
                     self.set_phase(ac, Phase::EoFinal);
                 } else {
                     self.set_phase(ac, Phase::EoGlide);
@@ -398,6 +413,20 @@ impl Autopilot {
             }
         }
         true
+    }
+
+    /// The runway direction the aircraft is lined up on, if any: near the centreline, tracking down it,
+    /// before the threshold (or, with `over_runway`, anywhere before the far end).
+    fn on_final_end(&self, ac: &Aircraft, wind: &Wind, over_runway: bool) -> Option<RunwayEnd> {
+        let track = ac.track(wind);
+        let len = self.planner.runway.length;
+        self.planner.ends.iter().copied().find(|e| {
+            let to_thr = e.dir * (e.threshold - ac.x);
+            !ac.on_ground
+                && ac.y.abs() < 100.0
+                && wrap_pi(track - e.heading).abs() < 30.0 * D2R
+                && (to_thr > 0.0 || (over_runway && to_thr > -(len - emergency::MIN_FINAL)))
+        })
     }
 
     fn turn_radius(&self, ac: &Aircraft, wind: &Wind) -> f64 {
@@ -510,14 +539,14 @@ impl Autopilot {
     pub fn update(&mut self, ac: &Aircraft, wind: &Wind, t: f64, dt: f64) -> Commands {
         self.t = t;
         if !ac.on_ground {
-            self.gust.update(ac, wind, dt);
+            self.gust.update(ac, wind, dt, self.cmd.beta.abs() > 1.0 * D2R);
         }
-        let mut c = self.cmd;
+        // the autopilot flies on what it can measure: from here on, `wind` is the estimated mean wind
+        let est = Wind::steady(self.gust.mean_wind());
+        let wind = &est;
+        // a fresh command each step; only the flap lever stays where it was until a phase moves it
+        let mut c = Commands { flaps: self.cmd.flaps, ..Default::default() };
         let s = self.circuit.spec.clone();
-        c.allow_liftoff = false;
-        c.no_touchdown = false;
-        c.flare = false;
-        c.beta = 0.0; // coordinated unless aligning
 
         match self.phase {
             Phase::TakeoffRoll => {
@@ -542,7 +571,7 @@ impl Autopilot {
                 self.fma.vert = "ROT".into();
                 if !ac.on_ground {
                     self.climb.engage(0.06);
-                    self.path.gamma_pi.i = 0.0;
+                    self.path.reset();
                     self.set_phase(ac, Phase::Climb);
                 }
             }
@@ -560,13 +589,13 @@ impl Autopilot {
                     self.fma.vert = if vx.is_some() { "PITCH-VX" } else { "PITCH-SPD" }.into();
                     self.fma.thr = "TOGA".into();
                     c.thr = 1.0;
-                    let g_min = if ac.h < 30.0 { 0.05 } else { -0.03 }; // never pitch down near the ground
-                    let g = self.climb.update(ac, vx.unwrap_or(s.vy), dt, g_min);
+                    let g_min = if ac.h < NEAR_GROUND * FT { 0.05 } else { -0.03 }; // never pitch down near the ground
+                    let g = self.climb.update(ac, vx.unwrap_or(s.v_climb), dt, g_min);
                     c.theta = self.path.gamma(ac, g, dt);
                 }
                 if self.phase == Phase::Climb {
                     self.fma.lat = "TRK 090".into();
-                    c.phi = self.leg_bank(ac, wind, Leg::Upwind, if ac.h < 60.0 { 10.0 * D2R } else { s.bank_max }).0;
+                    c.phi = self.leg_bank(ac, wind, Leg::Upwind, if ac.h < LOW_BANK * FT { 10.0 * D2R } else { s.bank_max }).0;
                     if ac.h >= s.crosswind_turn_alt {
                         let lead = self.turn_lead(ac, wind);
                         if self.circuit.crosswind_x.is_none() {
@@ -645,7 +674,7 @@ impl Autopilot {
                     self.align(ac, wind, &mut c, 0.0, Some(line));
                 } else {
                     c.phi =
-                        self.leg_bank(ac, wind, Leg::Final, if ac.h < 30.0 { 10.0 * D2R } else { s.bank_max }).0;
+                        self.leg_bank(ac, wind, Leg::Final, if ac.h < NEAR_GROUND * FT { 10.0 * D2R } else { s.bank_max }).0;
                 }
                 let gvx = ac.ground_velocity(wind).x;
                 let rwy = &self.circuit.runway;
@@ -764,17 +793,19 @@ impl Autopilot {
                     self.fma = Fma::new("—", "—", "—");
                 }
             }
-            Phase::EoGlide => self.eo_glide(ac, wind, t, dt, &mut c, &s),
+            Phase::EoGlide => self.eo_glide(ac, wind, t, dt, &mut c),
             Phase::EoFinal => self.eo_final(ac, wind, dt, &mut c, &s),
             Phase::ForcedLanding => {
-                let vbg = self.vbg_wind(ac, wind);
-                let vapp_eo = self.planner.spec.vapp_eo;
                 let tr = self.engine_out.as_ref().unwrap().track;
                 self.fma = Fma::new("ENG OUT", "GLIDE", "TRK HOLD");
                 c.thr = 0.0;
-                c.flaps = if ac.h < 300.0 * FT { 20.0 } else { 0.0 };
-                let gust_add = self.gust_add_eo();
-                c.theta = self.glide_pitch(ac, Self::turn_speed(if c.flaps >= 20.0 { vapp_eo + gust_add } else { vbg }, ac.shaper.phi), dt);
+                // flap that is out stays out; flap 20 for the landing
+                if ac.h < 300.0 * FT {
+                    self.eo_flaps = self.eo_flaps.max(20.0);
+                }
+                c.flaps = self.eo_flaps;
+                let v = if c.flaps >= 20.0 { self.planner.spec.vapp_eo + self.gust_add_eo() } else { self.planner.spec.vbg };
+                c.theta = self.glide_pitch(ac, v.max(self.planner.turn_speed(ac, ac.shaper.phi, c.flaps)), dt);
                 if ac.h < s.align_height {
                     self.align(ac, wind, &mut c, tr, None);
                 } else {
@@ -804,253 +835,160 @@ impl Autopilot {
         if ac.v > (VFE_10 - 2.0) * KT {
             c.flaps = 0.0;
         }
+        if self.engine_out.is_some() {
+            c.pitch_rate = Some(self.planner.spec.pitch_rate);
+        }
         self.cmd = c;
         c
     }
 
-    /// Best glide, clean: direct to a base key point, down a short base leg, then turn final at the intercept.
-    fn eo_glide(&mut self, ac: &Aircraft, wind: &Wind, t: f64, dt: f64, c: &mut Commands, s: &crate::airfield::CircuitSpec) {
-        let end = self.eo_end();
-        let ip_d = self.glide.as_ref().unwrap().ip_distance;
-        let wp = self.planner.waypoints(ac, wind, ip_d, &end);
-        self.fma = Fma::new("ENG OUT", "GLIDE", &format!("DIR IP {}", end.name));
+    /// Power-off glide along the planned Dubins path to the final fix. The path is made in the air mass
+    /// and followed there (the aircraft's air-mass position is its ground position less the wind's drift
+    /// since the path was made) with one vector-field law; it is made afresh when the plan changes
+    /// (direction, fix) or the aircraft is more than `PATH_OFF` m off it. The energy is re-checked every
+    /// second; the runway is given up only when no plan reaches it.
+    fn eo_glide(&mut self, ac: &Aircraft, wind: &Wind, t: f64, dt: f64, c: &mut Commands) {
+        let g = self.glide.clone().unwrap();
+        let end = g.end;
+        let w = wind.v;
         c.thr = 0.0;
-        // flap early when the plan shows height to burn, once heading for the intercept (never on the way
-        // to a key behind, where the energy may still be needed); it is never retracted
-        let surplus = self.glide.as_ref().map(|g| g.surplus).unwrap_or(0.0);
-        let committed = wp.base_key.is_none() || self.passed_base_key;
-        if committed {
-            if surplus > EARLY_FLAP_SURPLUS * 2.0 {
-                self.eo_flaps = self.eo_flaps.max(20.0);
-            } else if surplus > EARLY_FLAP_SURPLUS {
-                self.eo_flaps = self.eo_flaps.max(10.0);
-            }
-        }
         c.flaps = self.eo_flaps;
-        let v_glide = if self.eo_flaps >= 20.0 { self.planner.spec.vapp_eo + self.gust_add_eo() } else { self.vbg_wind(ac, wind) };
-        // pitch for the glide speed now, from the previous bank; corrected for this step's bank below
-        c.theta = self.glide_pitch(ac, Self::turn_speed(v_glide, ac.shaper.phi), dt);
-        let gv = ac.ground_velocity(wind);
-        let vg = gv.x.hypot(gv.y);
-        let r = (vg * vg) / (G * s.bank_max.tan());
-        let roll_in = vg * (s.bank_max / ac.shaper.rates.phi) * 0.5;
-        // once past the base key (or going direct to the intercept): if a turn onto final started now
-        // would only just reach the centreline (wind drift and any roll reversal included), start it now
-        let heading_for_key = wp.base_key.is_some() && !self.passed_base_key;
-        if !heading_for_key && self.final_turn_due(ac, wind, &end) {
+        let bank = self.planner.spec.turn_bank;
+        let stale = match &self.eo_path {
+            None => true,
+            Some(p) => p.end != end.name || (p.fix - g.ip_distance).abs() > 1.0,
+        };
+        if stale {
+            let (path, _, _) = self.planner.path_to_fix(ac, w, &end, g.ip_distance);
+            self.eo_path = Some(EoPath { follow: Follower::new(path), t0: t, wind: w, end: end.name, fix: g.ip_distance });
+        }
+        let m = Motion { v: ac.v, phi: ac.phi, roll: ac.shaper.rates.phi, bank };
+        let ep = self.eo_path.as_mut().unwrap();
+        let (qx, qy) = (ac.x - ep.wind.x * (t - ep.t0), ac.y - ep.wind.y * (t - ep.t0));
+        let st = ep.follow.steer(qx, qy, ac.psi, m);
+        let seg = ep.follow.seg;
+        let (arc_left, straight_left) = (st.arc_left, st.straight_left);
+        if st.offset > PATH_OFF {
+            self.eo_path = None; // made afresh next step from where the aircraft is
+        }
+        // bank: the arc's feed-forward, plus a correction from the heading error (3 s to take it out)
+        c.phi = dubins::bank_command(&st, m, ac.psi, 3.0);
+        c.theta = self.glide_pitch(ac, self.planner.turn_speed(ac, ac.shaper.phi, self.eo_flaps), dt);
+        let what = if st.turn > 0.0 { "L" } else if st.turn < 0.0 { "R" } else { "TO" };
+        self.fma = Fma::new("ENG OUT", "GLIDE", &format!("{what} FIX {}", end.name));
+        // joined the final: lined up, the path's last turn done (or nearly), at or near the join point
+        let to_join = self.planner.to_point(ac.x, -g.ip_distance, &end);
+        let turned = seg == 3 || (seg == 2 && st.to_go < 15.0 * D2R);
+        if turned && self.on_final_end(ac, wind, true).is_some_and(|e| e.name == end.name) && to_join <= 150.0 {
             self.set_phase(ac, Phase::EoFinal);
             return;
         }
-        match wp.base_key {
-            Some([bx, by]) if !self.passed_base_key => {
-                let brg = (by - ac.y).atan2(bx - ac.x);
-                let dist = (bx - ac.x).hypot(by - ac.y);
-                let base_brg = (wp.ip[1] - by).atan2(wp.ip[0] - bx);
-                // no corner-cutting beyond a 120° turn at the key
-                let lead = r * (wrap_pi(base_brg - brg).abs().min(KEY_CUT_MAX) / 2.0).tan() + roll_in;
-                self.fma.lat = "DIR KEY".into();
-                c.phi = self.guidance.bank_for(ac, wind, brg, Self::eo_turn_bank(ac, wind, brg, s.bank_max, self.tune.eo_turn_bank));
-                if dist < lead || end.dir * (ac.x - bx) < 0.0 {
-                    self.passed_base_key = true;
-                }
-            }
-            Some(key) => {
-                let g = self.guidance.follow(ac, key, wp.ip);
-                self.fma.lat = "BASE".into();
-                c.phi = self.guidance.bank_for(ac, wind, g.desired_track, s.bank_max);
-                // turn onto final when the turn, drift included, will just reach the centreline
-                let base_dir = (wp.ip[1] - key[1]).atan2(wp.ip[0] - key[0]);
-                if g.remaining < self.planner.turn_reach(ac.v, wind.along(base_dir)) {
-                    self.set_phase(ac, Phase::EoFinal);
-                    return;
-                }
-            }
-            None => {
-                let [ipx, ipy] = wp.ip;
-                let brg = (ipy - ac.y).atan2(ipx - ac.x);
-                let dist = (ipx - ac.x).hypot(ipy - ac.y);
-                let lead = r * (wrap_pi(brg - end.heading).abs().min(2.5) / 2.0).tan() + roll_in;
-                c.phi = self.guidance.bank_for(ac, wind, brg, Self::eo_turn_bank(ac, wind, brg, s.bank_max, self.tune.eo_turn_bank));
-                // inside the intercept point near the line counts as on final only when roughly heading down it;
-                // heading away (failure just after the crosswind turn began), go round to the intercept point
-                let aligned = wrap_pi(ac.track(wind) - end.heading).abs() < 75.0 * D2R;
-                // the turn lead only counts once the aircraft is actually flying toward the intercept point
-                let toward_ip = wrap_pi(brg - ac.track(wind)).abs() < 60.0 * D2R;
-                if (dist < lead && toward_ip) || (end.dir * (ac.x - ipx) > 0.0 && ac.y.abs() < 150.0 && aligned) {
-                    self.set_phase(ac, Phase::EoFinal);
-                    return;
-                }
-            }
-        }
         if t - self.last_assess > 1.0 {
-            // re-plan each second: longest reachable final, keep the current one if only that works,
-            // give up on the runway only when nothing reaches
             self.last_assess = t;
-            let fresh = self.planner.plan(ac, wind, Some(&end));
-            let keep = self.planner.assess(ac, wind, ip_d, &end);
-            let g = if fresh.reachable { fresh } else if keep.available >= keep.required { keep } else { fresh };
-            let mut lost = g.available < g.required;
-            self.glide = Some(g);
-            if lost && STRETCH {
-                if let Some(st) = self.planner.stretch(ac, wind, Some(&end)) {
-                    if st.end.name != end.name || st.ip_distance != ip_d {
-                        self.log(ac, "STRETCH", Some(format!("Short final to runway {}: any part will do", st.end.name)));
-                    }
-                    self.glide = Some(st);
-                    lost = false;
+            // keep the plan while it works, unless a fresh one is clearly better: it reaches when this one
+            // no longer does, or has `SWITCH_GAIN` more height in hand
+            let mut keep = self.planner.assess_along(ac, w, &end, g.ip_distance, g.aim, arc_left, straight_left);
+            keep.route = g.route.clone();
+            let fresh = self.planner.plan(ac, w, Some(&end));
+            let switch = fresh.reachable && (!keep.reachable || fresh.surplus.min(PLAN_KEEP) > keep.surplus.min(PLAN_KEEP) + SWITCH_GAIN);
+            if keep.reachable && !switch {
+                self.glide = Some(keep);
+            } else if switch {
+                if fresh.end.name != end.name || (fresh.ip_distance - g.ip_distance).abs() > 1.0 {
+                    self.log(ac, "REPLAN", Some(format!("Runway {}, joining {} m {}, aiming {} m in", fresh.end.name, fresh.ip_distance.abs().round(), if fresh.ip_distance >= 0.0 { "out" } else { "in" }, fresh.aim.round())));
                 }
-            }
-            if lost {
+                self.glide = Some(fresh);
+            } else if keep.available >= keep.required {
+                // the margins are eaten but the path still reaches: carry on
+                self.glide = Some(keep);
+            } else {
                 let tr = ac.track(wind);
                 let eo = self.engine_out.as_mut().unwrap();
                 eo.plan = EngineOutPlan::LandAhead;
                 eo.track = Self::field_track(ac, wind, tr);
                 self.log(ac, "FORCED_LANDING", Some("Runway no longer reachable".into()));
-                self.phase = Phase::ForcedLanding;
+                self.set_phase(ac, Phase::ForcedLanding);
             }
         }
-    }
-
-    /// Best-glide speed for the wind: in a headwind fly faster (about half the headwind component, up to
-    /// +12 kt) to cover more ground per foot of height; in a tailwind best glide is already close to
-    /// minimum sink in this model, so the speed stays. From `examples/glide_speed.rs` (6DOF trim).
-    fn vbg_wind(&self, ac: &Aircraft, wind: &Wind) -> f64 {
-        let head = -wind.along(ac.track(wind));
-        self.planner.spec.vbg + (VBG_HEAD_K * (head - VBG_HEAD_DEADBAND * KT).max(0.0)).min(12.0 * KT)
-    }
-
-    /// Bank for power-off turns: a big heading change (a turn back) is flown steeper, which loses less
-    /// height per degree of turn; small corrections keep the circuit bank.
-    /// Glide speed in a turn: the best-glide α is held, so the speed rises with √(load factor); the nose
-    /// goes down as the bank goes on, and the stall-margin bank limit then allows the bank the turn needs.
-    fn turn_speed(v: f64, phi: f64) -> f64 {
-        v / phi.abs().min(50.0 * D2R).cos().sqrt()
-    }
-    fn eo_turn_bank(ac: &Aircraft, wind: &Wind, brg: f64, circuit_bank: f64, turn_bank_deg: f64) -> f64 {
-        let gv = ac.ground_velocity(wind);
-        if wrap_pi(brg - gv.y.atan2(gv.x)).abs() > 60.0 * D2R { circuit_bank.max(turn_bank_deg * D2R) } else { circuit_bank }
     }
 
     /// Track for a field landing: ahead, but turned toward the wind when there is height to spare (any
     /// amount above 700 ft, up to 90° from 400 ft, 30° lower down), so the touchdown is into wind rather
-    /// than in a crosswind the rudder cannot straighten.
+    /// than in a crosswind the rudder cannot straighten. Uses the estimated wind.
     fn field_track(ac: &Aircraft, wind: &Wind, track: f64) -> f64 {
-        let ws = wind.settings.speed_kt;
-        if ws < 8.0 || ac.on_ground {
+        if wind.v.x.hypot(wind.v.y) < 8.0 * KT || ac.on_ground {
             return track;
         }
-        // math angle the wind comes from (heading_deg is compass; wind from N blows toward −y)
-        let into = wrap_pi(PI / 2.0 - wind.settings.from_deg * D2R);
+        // math angle the wind comes from
+        let into = (-wind.v.y).atan2(-wind.v.x);
         let lim = if ac.h > 700.0 * FT { PI } else if ac.h > 400.0 * FT { FIELD_TURN_MAX * D2R } else { 30.0 * D2R };
         wrap_pi(track + clamp(wrap_pi(into - track), -lim, lim))
     }
 
-    /// Would a turn onto the final line, begun now at the circuit bank limit, carry the aircraft through
-    /// the centreline? Air-mass turn geometry plus the wind's drift over the turn and the roll-in. Only
-    /// counts when the aircraft is outside the intercept region and closing on (or turning across) the line.
-    fn final_turn_due(&self, ac: &Aircraft, wind: &Wind, end: &RunwayEnd) -> bool {
-        let bank = self.circuit.spec.bank_max;
-        let rate = ac.shaper.rates.phi;
-        let gv = ac.ground_velocity(wind);
-        let chi = gv.y.atan2(gv.x);
-        // the line's normal, pointing from the centreline to the aircraft
-        let side = if ac.y >= 0.0 { 1.0 } else { -1.0 };
-        let dist = ac.y.abs();
-        if dist < 30.0 || self.planner.to_aim(ac.x, end) < 300.0 {
-            return false;
-        }
-        // heading relative to the final direction, and the velocity component toward the line
-        let theta = wrap_pi(chi - end.heading);
-        let closing = -side * gv.y;
-        if closing <= 0.0 || theta.abs() < 20.0 * D2R {
-            return false;
-        }
-        let v = ac.v.max(20.0);
-        let r = v * v / (G * bank.tan());
-        // turning from θ to 0: air-mass displacement toward the line
-        let d_air = r * (1.0 - theta.cos());
-        let t_turn = theta.abs() * r / v;
-        // roll from the current bank to the bank of the turn toward the line
-        let turn_sign = -theta.signum(); // + = left (CCW)
-        let t_roll = (turn_sign * bank - ac.phi).abs() / rate;
-        let w_toward = -side * wind.v.y;
-        let reach = d_air + w_toward * t_turn + closing * t_roll * 0.8 + 50.0;
-        reach >= dist
-    }
-
-    /// Power-off final: add flap in stages when still high (never retract), forward-slip if even full flap
-    /// will not get it down, straighten for touchdown below 60 ft.
+    /// Power-off final. One energy decision, the drag ladder: of the levels allowed here (flap beyond 10°
+    /// only once lined up or low; the slip only when aligned and above the slip floor; no flap raised
+    /// near the ground), take the one whose straight glide touches down nearest the planned aim point
+    /// without falling short of the runway. When short, that is the lowest drag (flap comes
+    /// up); when even the most drag lands well beyond the farthest usable aim point, plan a longer path.
     fn eo_final(&mut self, ac: &Aircraft, wind: &Wind, dt: f64, c: &mut Commands, s: &crate::airfield::CircuitSpec) {
-        let end = self.eo_end();
-        // any part of the runway will do: when high, move the aim point down the runway (up to where a
-        // flare and stop still fit) before reaching for slips and S-turns
-        let nominal = self.planner.to_aim(ac.x, &end);
-        let g20 = self.planner.gradient(ac, wind, 20.0, &end);
-        let along_more = (ac.h / (g20 * 1.05) - nominal).clamp(0.0, (self.planner.far_aim_distance() - self.planner.spec.aim_point).max(0.0));
-        let dist = nominal + along_more;
-        let greq = if dist > 30.0 { ac.h / dist } else { f64::INFINITY };
-        // Energy, in the order a pilot would use it when high:
-        //  1. flap in stages to 20° (beyond 10° only once roughly lined up, so the turn uses the flatter glide)
-        //  2. a forward slip (cross-controls) at flap 20 — the C172 POH advises against steep slips with
-        //     more than 20°; in this model a full-rudder slip adds about 25% to the sink rate
-        //  3. S-turns if even that will not get it down
-        //  4. flap 30 only when not slipping (no longer high, or below the slip floor)
-        let lined_up = wrap_pi(ac.track(wind) - end.heading).abs() < 30.0 * D2R && ac.y.abs() < 150.0;
-        // still turning round onto final (failure just after the crosswind turn began): the straight-line
-        // energy sums do not apply yet, so no more flap goes out until the turn is done
-        let reversing = wrap_pi(ac.track(wind) - end.heading).abs() > 90.0 * D2R && ac.h > 300.0 * FT;
+        let g = self.glide.clone().unwrap();
+        let end = g.end;
+        let w = wind.v;
+        let trk_err = wrap_pi(ac.track(wind) - end.heading).abs();
+        let lined_up = trk_err < 30.0 * D2R && ac.y.abs() < 150.0;
         let low = ac.h < 300.0 * FT;
-        // clearly high: flap 20 even before lined up (the energy is not needed for the turn)
-        let clearly_high = greq > self.planner.gradient(ac, wind, 20.0, &end) * 1.2;
-        let flap_cap = if lined_up || low || clearly_high { 20.0 } else { 10.0 };
-        let flap_cap = if reversing { 0.0 } else { flap_cap };
-        // short of the runway with flap out: raise it in stages for the flatter clean glide (not close to
-        // the ground, where the sink while it comes up would cost more than it gains)
-        // "short" means short of the runway itself (60 m past the threshold), not of the normal aim point
-        let to_thr = end.dir * (end.threshold - ac.x) + 60.0;
-        let greq_thr = if to_thr > 30.0 { ac.h / to_thr } else { f64::INFINITY };
-        while self.eo_flaps > 0.0 && lined_up && ac.h > RETRACT_FLOOR * FT && greq_thr < self.planner.gradient(ac, wind, self.eo_flaps, &end) * 0.95 {
-            self.eo_flaps -= 10.0;
+        let aligned = trk_err < SLIP_ALIGN_TRK * D2R && ac.y.abs() < SLIP_ALIGN_Y;
+        // touch down nearest the planned aim point, never short of the runway's first `aim_min`
+        let far = self.planner.far_aim(w, &end).max(g.aim);
+        let (d_near, d_nom, d_far) = (
+            self.planner.to_point(ac.x, self.planner.spec.aim_min, &end),
+            self.planner.to_point(ac.x, g.aim, &end),
+            self.planner.to_point(ac.x, far, &end),
+        );
+        let current = LADDER[self.drag];
+        let allowed = |l: &(f64, bool)| {
+            (l.0 <= 10.0 || lined_up || low)
+                && (!l.1 || (aligned && ac.h > SLIP_FLOOR * FT))
+                && (l.0 >= current.0 || ac.h > RETRACT_FLOOR * FT)
+        };
+        // touchdown distance ahead for each level, and the choice
+        let reach = |l: &(f64, bool)| ac.h / self.planner.gradient(ac, w, l.0, if l.1 { SLIP_SINK_GAIN } else { 1.0 }, &end);
+        let mut best: Option<(usize, f64)> = None;
+        for (i, l) in LADDER.iter().enumerate() {
+            if !allowed(l) || reach(l) < d_near {
+                continue;
+            }
+            // a small preference for staying put, so the level does not flicker between two
+            let err = (reach(l) - d_nom).abs() * if i == self.drag { 0.9 } else { 1.0 };
+            if best.map_or(true, |b| err < b.1) {
+                best = Some((i, err));
+            }
         }
-        while self.eo_flaps < flap_cap && greq > self.planner.gradient(ac, wind, self.eo_flaps + 10.0, &end) * 1.05 {
-            self.eo_flaps += 10.0;
-        }
-        // the slip itself waits until properly lined up: it has little bank left to correct the track
-        let aligned = wrap_pi(ac.track(wind) - end.heading).abs() < 15.0 * D2R && ac.y.abs() < SLIP_ALIGN_Y;
-        let slip = aligned && self.eo_flaps >= 20.0 && ac.h > SLIP_FLOOR * FT && greq > g20 * 1.05;
-        if !slip && (lined_up || low) && self.eo_flaps < 30.0 && greq > self.planner.gradient(ac, wind, 30.0, &end) * 0.95 {
-            self.eo_flaps = 30.0;
+        let lowest = LADDER.iter().position(|l| allowed(l)).unwrap_or(self.drag);
+        self.drag = best.map(|b| b.0).unwrap_or(lowest);
+        let (flap, slip) = LADDER[self.drag];
+        self.eo_flaps = flap;
+        // far too high even with the most drag: back to planning, which finds a longer path to a fix
+        let most = LADDER.iter().filter(|l| allowed(l)).map(|l| reach(l)).fold(f64::INFINITY, f64::min);
+        if ac.h > REPLAN_FLOOR * FT && d_far > 300.0 && most > d_far * (1.0 + REPLAN_LONG) {
+            let fresh = self.planner.plan(ac, w, Some(&end));
+            if fresh.reachable && fresh.ip_distance > self.planner.to_point(ac.x, 0.0, &end) {
+                self.log(ac, "EXTEND", Some("High on final: a longer path".into()));
+                self.glide = Some(fresh);
+                self.eo_path = None;
+                self.set_phase(ac, Phase::EoGlide);
+                return;
+            }
         }
         c.thr = 0.0;
-        c.flaps = self.eo_flaps;
-        let gust_add = self.gust_add_eo();
-        // with the C172P drag a power-off flare needs the full 66 kt, short field or not (short-field
-        // technique still brakes at once)
-        let vapp_eo = self.planner.spec.vapp_eo;
-        let v = if self.eo_flaps >= 20.0 { vapp_eo + gust_add } else { self.vbg_wind(ac, wind) };
+        c.flaps = flap;
+        let v = if flap >= 20.0 { self.planner.spec.vapp_eo + self.gust_add_eo() } else { self.planner.spec.vbg };
         c.theta = self.glide_pitch(ac, v, dt);
-        self.fma = Fma::new("ENG OUT", &format!("GLIDE F{}", self.eo_flaps as i32), &format!("LOC {}", end.name));
-        // far too high even for a slip (an early turn in, or a strong tailwind): S-turns across the
-        // centreline lengthen the path; they stop once flap and a slip can manage the rest
-        let g_slip = g20 * SLIP_SINK_GAIN;
-        let weave = ac.h > 350.0 * FT && dist > S_TURN_MIN_DIST && greq > g_slip * S_TURN_RATIO;
-        if !weave {
-            self.s_turn = 0.0;
-        }
+        self.fma = Fma::new("ENG OUT", &format!("GLIDE F{}{}", flap as i32, if slip { " SLIP" } else { "" }), &format!("LOC {}", end.name));
+        let _ = d_far;
         if ac.h < s.align_height {
             let line = self.end_line(&end);
             self.align(ac, wind, c, end.heading, Some(line));
-        } else if weave {
-            if self.s_turn == 0.0 {
-                self.s_turn = if ac.y >= 0.0 { -1.0 } else { 1.0 };
-            }
-            // swing to the other side once 150 m across
-            if ac.y * self.s_turn > S_TURN_WIDTH {
-                self.s_turn = -self.s_turn;
-            }
-            let track = end.heading + end.dir * self.s_turn * 45.0 * D2R;
-            c.phi = self.guidance.bank_for(ac, wind, track, s.bank_max);
-            self.fma.lat = "S-TURN".into();
         } else if slip {
             // forward slip: into-wind wing down, opposite rudder, track held on the centreline;
             // the direction is picked once so it does not flip back and forth
@@ -1062,7 +1000,13 @@ impl Autopilot {
             c.phi = clamp(ac.wing_low_bank() + self.line_bank(ac, wind, &end, SLIP_LINE_BANK * D2R), -12.0 * D2R, 12.0 * D2R);
             self.fma.lat = "SLIP".into();
         } else {
-            let bank = if ac.h < 30.0 { 10.0 * D2R } else if reversing { s.bank_max.max(self.tune.eo_turn_bank * D2R) } else { s.bank_max };
+            let bank = if ac.h < NEAR_GROUND * FT {
+                10.0 * D2R
+            } else if trk_err > 60.0 * D2R {
+                s.bank_max.max(self.planner.spec.turn_bank)
+            } else {
+                s.bank_max
+            };
             c.phi = self.line_bank(ac, wind, &end, bank);
         }
         self.flare_if_low(ac);

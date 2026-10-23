@@ -112,7 +112,7 @@ fn frame(s: &Simulation, cursor: usize) -> String {
     let ap = &s.autopilot;
     let gv = ac.ground_velocity(&s.wind);
     let end = ap.eo_end();
-    let aim = ap.planner.aim_for(&end);
+    let aim = ap.planner.aim_at(ap.glide.as_ref().map_or(ap.planner.spec.aim_point, |g| g.aim), &end);
     let rwy = s.runway();
     let mut j = Json::default();
     j.obj();
@@ -126,7 +126,7 @@ fn frame(s: &Simulation, cursor: usize) -> String {
     j.k("noseHeading").num(ac.nose_heading()).k("track").num(gv.y.atan2(gv.x)).k("groundSpeed").num(gv.x.hypot(gv.y));
     j.k("stalled").bool(ac.stalled).k("onGround").bool(ac.on_ground).k("engineFailed").bool(ac.engine_failed);
     j.k("stillAirReach").num(ap.planner.still_air_reach(ac));
-    let (fc, fr) = ap.planner.footprint(ac, &s.wind);
+    let (fc, fr) = ap.planner.footprint(ac, ap.gust.mean_wind());
     j.k("glideFootprint").obj().k("c").point(fc).k("r").num(fr).end_obj();
     j.k("six");
     match &ac.six {

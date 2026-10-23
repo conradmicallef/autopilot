@@ -42,7 +42,9 @@ pub struct CircuitSpec {
     pub crosswind_turn_alt: f64,
     pub flaps_up_alt: f64,
     pub vr: f64,
-    pub vy: f64,
+    /// Climb speed: 65 kt, between Vx (62) and Vy (74). It climbs at a steeper angle than Vy, which keeps
+    /// the runway within power-off reach for longer after take-off (`examples/xw_sweep.rs`).
+    pub v_climb: f64,
     pub vdownwind: f64,
     pub vdescent: f64,
     pub vbase: f64,
@@ -72,7 +74,7 @@ pub fn standard_circuit() -> CircuitSpec {
         crosswind_turn_alt: 500.0 * FT,
         flaps_up_alt: 300.0 * FT,
         vr: 55.0 * KT,
-        vy: 65.0 * KT,
+        v_climb: 65.0 * KT,
         vdownwind: 90.0 * KT,
         vdescent: 75.0 * KT,
         vbase: 70.0 * KT,

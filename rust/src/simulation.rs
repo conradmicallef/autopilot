@@ -134,28 +134,12 @@ impl Simulation {
         airframe.mass *= pt.mass;
         let mut aircraft = Aircraft::new(airframe, opts.model);
         if let Some(six) = aircraft.six.as_mut() {
-            let g = &mut six.fcs.gains;
-            g.k_theta = tu.k_theta;
-            g.k_q = tu.k_q;
-            g.ki_theta = tu.ki_theta;
-            g.k_phi = tu.k_phi;
-            g.k_p = tu.k_p;
-            g.k_beta = tu.k_beta;
-            g.k_r = tu.k_r;
+            six.fcs.gains = crate::sixdof::fcs::FcsGains::from_tuning(&tu);
             six.prm.control_power = pt.control_power;
             six.prm.pitch_stability = pt.pitch_stability;
             six.prm.actuator_tau *= pt.actuator_lag;
         }
-        let mut proc_ = proc_;
-        proc_.flare_lead = if proc_.short_field { tu.flare_lead_short } else { tu.flare_lead };
-        let mut autopilot = Autopilot::with_procedure(circuit, proc_);
-        autopilot.planner.spec.vapp_eo = tu.vapp_eo_kt * KT;
-        autopilot.planner.spec.vbg = tu.vbg_kt * KT;
-        autopilot.planner.spec.margin_factor = tu.eo_margin_factor;
-        autopilot.planner.spec.margin_height = tu.eo_margin_height;
-        autopilot.planner.spec.key_margin = tu.key_margin;
-        autopilot.planner.spec.stretch_margin = tu.stretch_margin;
-        autopilot.tune = tu;
+        let autopilot = Autopilot::with_procedure(circuit, proc_, tu);
         Simulation {
             t: 0.0,
             aircraft,
@@ -198,7 +182,11 @@ impl Simulation {
 
     /// Stop the engine now; the autopilot decides how to handle it.
     pub fn fail_engine(&mut self) -> bool {
-        self.autopilot.fail_engine(&mut self.aircraft, &self.wind)
+        let ok = self.autopilot.fail_engine(&self.aircraft, &self.wind);
+        if ok {
+            self.aircraft.engine_failed = true;
+        }
+        ok
     }
 
     pub fn step(&mut self) {
@@ -305,7 +293,8 @@ impl Simulation {
             self.next_reach_check = self.t + 0.5;
             let climbing_low = matches!(self.phase(), Phase::Climb | Phase::GoAround)
                 && ac.h < ap.planner.spec.min_turnback_height;
-            let g = ap.planner.plan(ac, &self.wind, None);
+            // what the autopilot would plan, on its own wind estimate
+            let g = ap.planner.plan(ac, ap.gust.mean_wind(), None);
             let r = !climbing_low && g.reachable;
             self.runway_reachable = Some(r);
             self.reach_end = if r { Some(g.end.name) } else { None };

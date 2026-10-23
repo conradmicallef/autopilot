@@ -7,7 +7,7 @@ use circuitsim::ModelKind;
 fn main() {
     let a: Vec<String> = std::env::args().skip(1).collect();
     let mut c = high_circuit();
-    if let Ok(v) = std::env::var("VY") { c.vy = v.parse::<f64>().unwrap() * KT; }
+    if let Ok(v) = std::env::var("VY") { c.v_climb = v.parse::<f64>().unwrap() * KT; }
     let delay: f64 = a[2].parse().unwrap();
     let mut s = new_sim(ModelKind::SixDof, wind(a[0].parse().unwrap(), a[1].parse().unwrap(), false), 1.0, c);
     let (mut t_xw, mut done, mut k) = (None, false, 0);
@@ -17,7 +17,7 @@ fn main() {
             done = s.fail_engine();
             let ac = &s.aircraft;
             println!("failure at x {:.0} y {:.0} h {:.0} ft", ac.x, ac.y, ac.h / FT);
-            for e in s.autopilot.planner.ends { let g = s.autopilot.planner.plan_for(ac, &s.wind, &e); println!("  end {}: reachable {} ip {:.0} required {:.0} available {:.0} surplus {:.0}", e.name, g.reachable, g.ip_distance, g.required, g.available, g.surplus); }
+            for e in s.autopilot.planner.ends { let g = s.autopilot.planner.plan_for(ac, s.autopilot.gust.mean_wind(), &e); println!("  end {}: reachable {} ip {:.0} required {:.0} available {:.0} surplus {:.0}", e.name, g.reachable, g.ip_distance, g.required, g.available, g.surplus); }
         }}}
         s.step(); k += 1;
         if done && k % 100 == 0 && !s.aircraft.on_ground {

@@ -161,10 +161,14 @@ pub const CD_BETA: f64 = 0.17;
 const CLWBH_A: [f64; 17] =
     [-0.09, 0.0, 0.09, 0.1, 0.12, 0.14, 0.16, 0.17, 0.19, 0.21, 0.24, 0.26, 0.28, 0.30, 0.32, 0.34, 0.36];
 /// Columns: normal, stalled (hysteresis branch).
+/// JSBSim's c172p has CL 0.73 at α 0.09 and 0.83 at 0.10: a slope of 10/rad over that step, twice the
+/// slope either side, which put a kink in the glide polar right at best glide (L/D 8.74 at 70 kt,
+/// 8.13 at 72 kt). The 0.09 point is raised onto the line through the points above it (0.78), which
+/// removes the jump and keeps the glide performance: best L/D 9.0 at 76 kt, minimum sink 811 fpm at 70.
 const CLWBH: [[f64; 2]; 17] = [
     [-0.22, -0.22],
     [0.25, 0.25],
-    [0.73, 0.73],
+    [0.78, 0.73],
     [0.83, 0.78],
     [0.92, 0.79],
     [1.02, 0.81],

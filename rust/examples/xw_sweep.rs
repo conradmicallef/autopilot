@@ -9,7 +9,7 @@ fn main() {
     let verbose = a.iter().any(|x| x == "-v");
     let mut pass = 0; let mut n = 0;
     let env = |k: &str| std::env::var(k).ok().and_then(|v| v.parse::<f64>().ok());
-    let tweak = |mut c: circuitsim::airfield::CircuitSpec| { if let Some(a) = env("XW_ALT") { c.crosswind_turn_alt = a * FT; } if let Some(v) = env("VY") { c.vy = v * circuitsim::units::KT; } if let Some(v) = env("CLR") { c.crosswind_clearance = v; } c };
+    let tweak = |mut c: circuitsim::airfield::CircuitSpec| { if let Some(a) = env("XW_ALT") { c.crosswind_turn_alt = a * FT; } if let Some(v) = env("VY") { c.v_climb = v * circuitsim::units::KT; } if let Some(v) = env("CLR") { c.crosswind_clearance = v; } c };
     let only_high = env("ONLY_HIGH").is_some();
     for (cn, c) in [("high", tweak(high_circuit())), ("std", tweak(standard_circuit()))] {
         if only_high && cn == "std" { continue; }
