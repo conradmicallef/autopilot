@@ -126,10 +126,77 @@ pub struct Simulation {
     pub perf: Performance,
     /// At an engine failure: could an ideal plan have reached the runway (`ceiling_reachable`)?
     pub eo_ceiling: Option<bool>,
+    /// Started in the air from this state (`start_airborne`).
+    pub air_start: Option<AirStart>,
     /// 50 ft trees beyond each end of the strip.
     pub obstacles: bool,
     prev_x: f64,
     prev_h: f64,
+}
+
+/// An airborne starting state (airfield frame): position, wheel height, airspeed, angle of attack and
+/// sideslip, nose heading (math angle), pitch, bank (+ left wing down), body rates (autopilot
+/// convention), throttle, flap, and whether the engine is out.
+#[derive(Clone, Copy, Debug, Serialize)]
+pub struct AirStart {
+    pub x: f64,
+    pub y: f64,
+    pub h: f64,
+    pub v: f64,
+    pub alpha: f64,
+    pub beta: f64,
+    pub heading: f64,
+    pub pitch: f64,
+    pub bank: f64,
+    pub rates: [f64; 3],
+    pub thr: f64,
+    pub flap: f64,
+    #[serde(rename = "engineOut")]
+    pub engine_out: bool,
+}
+
+impl AirStart {
+    /// A random state within reach of the field, possibly an upset: 1.5–5 km from mid-runway, 1,000–3,000
+    /// ft (to 3,500 with the engine out), 50–120 kt, any heading, bank to ±70°, pitch to ±25°, some
+    /// roll, pitch and yaw rate. With the engine out, only states an ideal power-off plan can still save
+    /// after a 300 ft recovery are kept (`Simulation::ideal_reach`).
+    pub fn random(sim: &Simulation, rng: &mut crate::atmosphere::Rng, engine_out: bool) -> AirStart {
+        let mut u = || rng.next();
+        for _ in 0..500 {
+            let (dist, brg) = (1500.0 + 3500.0 * u(), 2.0 * crate::units::PI * u());
+            let len = sim.runway().length;
+            let h = (1000.0 + (if engine_out { 2500.0 } else { 2000.0 }) * u()) * FT;
+            let v = (50.0 + 70.0 * u()) * KT;
+            let a = AirStart {
+                x: 0.5 * len + dist * brg.cos(),
+                y: dist * brg.sin(),
+                h,
+                v,
+                alpha: 0.02 + 0.10 * u(),
+                beta: (u() - 0.5) * 8.0 * D2R,
+                heading: 2.0 * crate::units::PI * u(),
+                pitch: (u() - 0.5) * 50.0 * D2R,
+                bank: (u() - 0.5) * 140.0 * D2R,
+                rates: [(u() - 0.5) * 30.0 * D2R, (u() - 0.5) * 10.0 * D2R, (u() - 0.5) * 10.0 * D2R],
+                thr: if engine_out { 0.0 } else { u() },
+                flap: if v < 95.0 * KT && u() < 0.4 { 10.0 } else { 0.0 },
+                engine_out,
+            };
+            if !engine_out {
+                return a;
+            }
+            // the same place, recovered: wings level, best-glide speed, 300 ft lower
+            let mut probe = sim.aircraft.clone();
+            let vbg = sim.autopilot.planner.spec.vbg;
+            probe.set_airborne(a.x, a.y, a.h - 300.0 * FT, a.v.max(vbg), 0.06, 0.0, a.heading, 0.0, 0.0, [0.0; 3], 0.0, 0.0, sim.steady_wind());
+            probe.engine_failed = true;
+            if sim.ideal_reach(&probe) {
+                return a;
+            }
+        }
+        // unreachable in 500 draws is not expected; fall back to overhead at 3,000 ft
+        AirStart { x: 600.0, y: 0.0, h: 3000.0 * FT, v: 70.0 * KT, alpha: 0.06, beta: 0.0, heading: 0.0, pitch: 0.0, bank: 0.0, rates: [0.0; 3], thr: 0.0, flap: 0.0, engine_out }
+    }
 }
 
 /// Touchdown speed limit, as a multiple of the stall speed for the flap set (about 1.05–1.1 is the
@@ -139,6 +206,13 @@ pub const TD_SPEED_MAX: f64 = 1.15;
 pub const TD_PITCH_MIN: f64 = 5.0;
 /// Extra touchdown speed allowed in gusts: half a typical gust factor, m/s (about 3.5 kt).
 pub const GUST_TD_ALLOWANCE: f64 = 1.8;
+
+/// Touchdown accuracy points: 100 on the target touchdown point, 1 less per `ACCURACY_M_PER_POINT` metres
+/// long or short, 0 from 300 m off.
+pub const ACCURACY_M_PER_POINT: f64 = 3.0;
+pub fn accuracy_points(miss: f64) -> f64 {
+    (100.0 - miss.abs() / ACCURACY_M_PER_POINT).max(0.0)
+}
 
 fn touchdown_rows(td: &Touchdown) -> (Criterion, Criterion) {
     // in a crosswind the technique touches down faster by half the crosswind component
@@ -192,6 +266,7 @@ impl Simulation {
             next_reach_check: 0.0,
             perf: Performance::default(),
             eo_ceiling: None,
+            air_start: None,
             obstacles: len < 1199.0,
             prev_x: 0.0,
             prev_h: 0.0,
@@ -224,6 +299,11 @@ impl Simulation {
         if ac.on_ground || self.phase() == Phase::Flare {
             return true;
         }
+        self.ideal_reach(ac)
+    }
+
+    /// The ideal plan (no margins, true mean wind) for a given aircraft state.
+    pub fn ideal_reach(&self, ac: &Aircraft) -> bool {
         let mut spec = self.autopilot.planner.spec.clone();
         spec.margin_factor = 1.0;
         spec.margin_height = 0.0;
@@ -232,6 +312,36 @@ impl Simulation {
         let to = (90.0 - (st.from_deg + 180.0)) * D2R;
         let w = crate::units::Vec2 { x: st.speed_kt * KT * to.cos(), y: st.speed_kt * KT * to.sin() };
         p.plan(ac, w, None).reachable
+    }
+
+    /// The steady wind vector (m/s, airfield frame) of the wind settings.
+    pub fn steady_wind(&self) -> crate::units::Vec2 {
+        let st = self.wind.settings;
+        let to = (90.0 - (st.from_deg + 180.0)) * D2R;
+        crate::units::Vec2 { x: st.speed_kt * KT * to.cos(), y: st.speed_kt * KT * to.sin() }
+    }
+
+    /// Start in the air from `a` instead of on the runway: the autopilot recovers, then lands (with the
+    /// engine out, through the engine-failure logic).
+    pub fn start_airborne(&mut self, a: &AirStart) {
+        let w = self.steady_wind();
+        self.aircraft.set_airborne(a.x, a.y, a.h, a.v, a.alpha, a.beta, a.heading, a.pitch, a.bank, a.rates, a.thr, a.flap, w);
+        self.aircraft.engine_failed = a.engine_out;
+        if a.engine_out {
+            self.eo_ceiling = Some(true); // the generator only keeps states an ideal plan can save
+        }
+        let note = format!(
+            "Random state: {} ft, {} kt, bank {}°, pitch {}°{}",
+            r0(a.h / FT),
+            r0(a.v / KT),
+            r0(a.bank / D2R),
+            r0(a.pitch / D2R),
+            if a.engine_out { ", engine out" } else { "" }
+        );
+        self.autopilot.start_airborne(&self.aircraft, a.engine_out, note);
+        self.air_start = Some(*a);
+        self.track.clear();
+        self.next_record = self.t;
     }
 
     /// Stop the engine now; the autopilot decides how to handle it.
@@ -422,6 +532,7 @@ impl Simulation {
         rows[6].value =
             Some(if stopped { format!("{} m mark", r0(self.aircraft.x)) } else { "rolling…".into() });
         rows[6].pass = if stopped { Some(rwy.contains(self.aircraft.x, self.aircraft.y)) } else { None };
+        rows.push(self.accuracy_row());
         rows.extend(self.distance_rows(stopped));
         rows.push(Criterion {
             label: "Runway within glide reach".into(),
@@ -476,6 +587,47 @@ impl Simulation {
             rows.push(c);
         }
         rows
+    }
+
+    /// The target touchdown point, metres past the landing threshold, and that threshold's runway end:
+    /// the normal and short-field aim point plus the hold-off float from the approach speed; for a
+    /// power-off return, the touchdown the glide plan aims for (it includes the float). None for a field.
+    pub fn touchdown_target(&self) -> Option<(f64, crate::emergency::RunwayEnd)> {
+        let ap = &self.autopilot;
+        match &ap.engine_out {
+            Some(eo) if eo.plan == EngineOutPlan::Return => ap.glide.as_ref().map(|g| (g.aim, g.end)),
+            Some(_) => None,
+            None => {
+                let end = ap.planner.ends[0];
+                let float = ap.planner.float_distance(&self.aircraft, ap.procedure.vapp + ap.gust_add(), 30.0, self.steady_wind(), &end);
+                Some((self.runway().aim_point + float, end))
+            }
+        }
+    }
+
+    /// Touchdown accuracy: distance from the target touchdown point and the points it scores.
+    pub fn accuracy(&self) -> Option<(f64, f64)> {
+        let td = self.touchdown.as_ref()?;
+        if !td.on_runway {
+            return None;
+        }
+        let (target, end) = self.touchdown_target()?;
+        let miss = end.dir * (td.x - end.threshold) - target;
+        Some((miss, accuracy_points(miss)))
+    }
+
+    fn accuracy_row(&self) -> Criterion {
+        let mut c = Criterion {
+            label: "Touchdown accuracy".into(),
+            target: format!("points: 100 on the target, −1 per {} m", r0(ACCURACY_M_PER_POINT)),
+            value: None,
+            pass: None,
+            info: true,
+        };
+        if let (Some((miss, pts)), Some((target, _))) = (self.accuracy(), self.touchdown_target()) {
+            c.value = Some(format!("{} points · {} m {} of the {} m target", r0(pts), r0(miss.abs()), if miss >= 0.0 { "long" } else { "short" }, r0(target)));
+        }
+        c
     }
 
     /// Engine-out outcome: was the decision carried out, and was the touchdown survivable and controlled?
@@ -539,6 +691,7 @@ impl Simulation {
             } else {
                 rows.extend([cl, cr]);
             }
+            rows.push(self.accuracy_row());
             let mut c = crit("Stopped on runway", &format!("within the {} m runway", r0(rwy.length)));
             if stopped {
                 c.value =

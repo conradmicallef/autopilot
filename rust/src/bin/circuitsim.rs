@@ -46,6 +46,10 @@ fn main() {
         "trace" => trace(model, &args[2..]),
         "stol" => stol(model),
         "tunecheck" => tunecheck(),
+        "randomland" => {
+            let n = args.iter().filter_map(|a| a.parse::<usize>().ok()).next().unwrap_or(100);
+            randomland(model, n)
+        }
         "autotune" => {
             let nums: Vec<usize> = args.iter().filter_map(|a| a.parse::<usize>().ok()).collect();
             autotune(model, *nums.first().unwrap_or(&12), *nums.get(1).unwrap_or(&120), *nums.get(2).unwrap_or(&2))
@@ -59,13 +63,37 @@ fn main() {
     std::process::exit(code);
 }
 
+/// Mean touchdown-accuracy points over the runway landings seen.
+#[derive(Default)]
+struct Points {
+    sum: f64,
+    n: usize,
+}
+impl Points {
+    fn add(&mut self, s: &Simulation) {
+        if let Some((_, p)) = s.accuracy() {
+            self.sum += p;
+            self.n += 1;
+        }
+    }
+    fn line(&self) -> String {
+        if self.n == 0 {
+            "touchdown accuracy: no runway landings".into()
+        } else {
+            format!("touchdown accuracy: {:.0} points on average over {} runway landings (100 = on the target touchdown point, −1 per 3 m)", self.sum / self.n as f64, self.n)
+        }
+    }
+}
+
 fn scenarios(model: ModelKind) -> i32 {
     let mut fails = 0;
     let mut total = 0;
+    let mut pts = Points::default();
     for circuit in circuits() {
         for (w, seed, ga) in normal_cases() {
             let s = fly_normal(model, w, seed, ga, circuit.clone());
             let ok = s.passed();
+            pts.add(&s);
             total += 1;
             if !ok {
                 fails += 1;
@@ -85,6 +113,7 @@ fn scenarios(model: ModelKind) -> i32 {
             );
         }
     }
+    println!("{}", pts.line());
     println!("{}/{} passed", total - fails, total);
     0
 }
@@ -116,11 +145,13 @@ fn engine(model: ModelKind) -> i32 {
     let mut pass = 0;
     let mut total = 0;
     let mut tally: std::collections::BTreeMap<&str, Tally> = Default::default();
+    let mut pts = Points::default();
     for circuit in circuits() {
         for w in eo_winds() {
             for tr in eo_triggers() {
                 let s = fly_eo(model, w, 4.0, &tr, circuit.clone());
                 let ok = s.passed();
+                pts.add(&s);
                 total += 1;
                 if ok {
                     pass += 1;
@@ -148,6 +179,7 @@ fn engine(model: ModelKind) -> i32 {
     }
     println!("by failure point (ceiling: an ideal plan reaches the runway, `Simulation::ceiling_reachable`):");
     print_tally(&tally);
+    println!("{}", pts.line());
     println!("{pass}/{total} passed");
     0
 }
@@ -276,12 +308,67 @@ fn modes() -> i32 {
     0
 }
 
+/// Auto-land from random airborne states (upsets included), engine running and engine out.
+fn randomland(model: ModelKind, n: usize) -> i32 {
+    let mut rng = Rng::new(20261023.0);
+    for engine_out in [false, true] {
+        let mut by: std::collections::BTreeMap<&str, (usize, usize)> = Default::default();
+        let mut reasons: std::collections::BTreeMap<String, usize> = Default::default();
+        let mut shown = 0;
+        let mut pts = Points::default();
+        for i in 0..n {
+            let w = WindSettings { from_deg: (rng.next() * 36.0).floor() * 10.0, speed_kt: (rng.next() * 16.0).floor(), gusts: rng.next() < 0.4 };
+            let circuit = if rng.next() < 0.5 { standard_circuit() } else { high_circuit() };
+            let seed = (rng.next() * 1e6).floor() + 1.0;
+            let mut s = new_sim(model, w, seed, circuit.clone());
+            let a = circuitsim::simulation::AirStart::random(&s, &mut rng, engine_out);
+            s.start_airborne(&a);
+            s.run(1500.0);
+            let ok = s.passed();
+            pts.add(&s);
+            let upset = a.bank.abs() > 45.0 * D2R || a.pitch.abs() > 15.0 * D2R;
+            let e = by.entry(if upset { "upset (bank > 45° or pitch > 15°)" } else { "milder" }).or_default();
+            e.1 += 1;
+            e.0 += ok as usize;
+            if !ok {
+                let failed: Vec<String> = if !s.finished() {
+                    vec!["did not stop (timeout)".into()]
+                } else {
+                    s.evaluate().iter().filter(|r| !r.info && r.pass != Some(true)).map(|r| r.label.clone()).collect()
+                };
+                for f in &failed {
+                    *reasons.entry(format!("{f}{}", if w.gusts { " (gusty)" } else { "" })).or_default() += 1;
+                }
+                if shown < 6 && std::env::var("SHOW").is_ok() {
+                    shown += 1;
+                    println!(
+                        "  #{i} {} {:03}/{:.0}{} start {:.0} ft {:.0} kt bank {:.0} pitch {:.0} at ({:.0},{:.0}): {} | {}",
+                        circuit.name, w.from_deg, w.speed_kt, if w.gusts { "G" } else { "" },
+                        a.h / FT, a.v / KT, a.bank / D2R, a.pitch / D2R, a.x, a.y, failed.join(", "), summary(&s)
+                    );
+                }
+            }
+        }
+        println!("Random airborne starts, engine {}: {n} flights", if engine_out { "OUT" } else { "running" });
+        for (k, (p, t)) in &by {
+            println!("  {k:<34} {p}/{t} passed ({:.0}%)", 100.0 * *p as f64 / (*t).max(1) as f64);
+        }
+        println!("  {}", pts.line());
+        println!("  failed criteria:");
+        for (k, c) in &reasons {
+            println!("    {c:3}  {k}");
+        }
+    }
+    0
+}
+
 fn montecarlo(model: ModelKind, n: usize) -> i32 {
     let mut rng = Rng::new(20261022.0);
     let mut by_kind: std::collections::BTreeMap<&str, (usize, usize)> = Default::default();
     let mut worst: Vec<(String, String)> = Vec::new();
     let mut reasons: std::collections::BTreeMap<String, usize> = Default::default();
     let mut tally: std::collections::BTreeMap<&str, Tally> = Default::default();
+    let mut pts: std::collections::BTreeMap<&str, Points> = Default::default();
     for i in 0..n {
         let w = WindSettings {
             from_deg: (rng.next() * 36.0).floor() * 10.0,
@@ -299,6 +386,7 @@ fn montecarlo(model: ModelKind, n: usize) -> i32 {
             ("normal circuit", fly_normal(model, w, seed, None, circuit.clone()), None)
         };
         let ok = s.passed();
+        pts.entry(kind).or_default().add(&s);
         if let Some(name) = trig {
             let reach = s.eo_ceiling.unwrap_or(false);
             let e = tally.entry(name).or_default();
@@ -333,6 +421,9 @@ fn montecarlo(model: ModelKind, n: usize) -> i32 {
     println!("Monte Carlo: {n} flights, winds 0–15 kt any direction, 40% gusty, both circuits");
     for (k, (p, t)) in &by_kind {
         println!("  {k:<15} {p}/{t} passed ({:.0}%)", 100.0 * *p as f64 / *t as f64);
+    }
+    for (k, p) in &pts {
+        println!("  {k:<15} {}", p.line());
     }
     println!("  engine failures by failure point:");
     print_tally(&tally);

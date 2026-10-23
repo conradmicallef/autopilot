@@ -79,6 +79,8 @@ pub struct Commands {
     pub flare: bool,
     /// Pitch slew limit for this command, rad/s, when not the default (the power-off glide uses a gentler one).
     pub pitch_rate: Option<f64>,
+    /// Bank slew limit, rad/s, when not the default (an upset recovery rolls faster).
+    pub roll_rate: Option<f64>,
 }
 
 /// Pitch slew allowed in the flare (the normal limit stays everywhere else, including go-arounds).
@@ -121,7 +123,7 @@ impl CommandShaper {
         let pitch_rate = if c.flare { base.max(FLARE_PITCH_RATE) } else { base };
         self.theta_rate = (slew(self.theta, c.theta, pitch_rate, dt) - self.theta) / dt;
         self.theta += self.theta_rate * dt;
-        self.phi = slew(self.phi, c.phi, self.rates.phi, dt);
+        self.phi = slew(self.phi, c.phi, c.roll_rate.unwrap_or(self.rates.phi), dt);
         self.thr = slew(self.thr, c.thr, self.rates.thr, dt);
         self.flaps = slew(self.flaps, c.flaps, self.rates.flaps, dt);
         self.beta = slew(self.beta, c.beta, self.rates.beta, dt);
@@ -276,6 +278,26 @@ impl Aircraft {
             ac.sync_from_six();
         }
         ac
+    }
+
+    /// Start in free flight (6DOF only): see `SixDof::set_airborne`. Throttle and flap are set as given,
+    /// and the command shaper starts from the current attitude so nothing steps.
+    #[allow(clippy::too_many_arguments)]
+    pub fn set_airborne(&mut self, x: f64, y: f64, h: f64, v: f64, alpha: f64, beta: f64, heading: f64, pitch: f64, bank: f64, rates: [f64; 3], thr: f64, flap: f64, wind: Vec2) {
+        let Some(six) = self.six.as_mut() else { return };
+        six.set_airborne(x, y, h, v, alpha, beta, heading, pitch, bank, rates, wind);
+        self.on_ground = false;
+        self.thr = thr;
+        self.flap_pos = flap;
+        self.brake = 0.0;
+        self.rollout_heading = None;
+        self.shaper.theta = pitch;
+        self.shaper.theta_rate = 0.0;
+        self.shaper.phi = bank;
+        self.shaper.thr = thr;
+        self.shaper.flaps = flap;
+        self.shaper.beta = 0.0;
+        self.sync_from_six();
     }
 
     pub fn flaps(&self) -> i32 {

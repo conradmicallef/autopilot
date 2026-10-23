@@ -301,6 +301,45 @@ impl SixDof {
     }
 
     /// Time derivative of the state, plus diagnostics.
+    /// Put the body in free flight: position in the airfield frame (x east, y north), wheel height `h`,
+    /// airspeed `v` at angle of attack `alpha` and sideslip `beta`, nose heading (math angle), pitch,
+    /// bank (+ = left wing down, the autopilot's convention) and body rates (autopilot convention:
+    /// p + = rolling left, q + = nose up, r + = yawing left), in a steady wind (m/s, airfield frame).
+    #[allow(clippy::too_many_arguments)]
+    pub fn set_airborne(&mut self, x: f64, y: f64, h: f64, v: f64, alpha: f64, beta: f64, heading: f64, pitch: f64, bank: f64, rates: [f64; 3], wind: crate::units::Vec2) {
+        let q = quat_from_euler(-bank, pitch, PI / 2.0 - heading);
+        self.x[0] = y;
+        self.x[1] = x;
+        self.x[2] = -(h + self.h0);
+        self.x[6..10].copy_from_slice(&q);
+        // body velocity over the ground = through the air + the wind, rotated into body axes
+        let air = [v * alpha.cos() * beta.cos(), v * beta.sin(), v * alpha.sin() * beta.cos()];
+        let r = rot(&q);
+        let w_ned = [wind.y, wind.x, 0.0];
+        let w_body = [0, 1, 2].map(|i| r[0][i] * w_ned[0] + r[1][i] * w_ned[1] + r[2][i] * w_ned[2]);
+        for i in 0..3 {
+            self.x[3 + i] = air[i] + w_body[i];
+        }
+        self.x[10] = -rates[0];
+        self.x[11] = rates[1];
+        self.x[12] = -rates[2];
+        self.wind_ned = w_ned;
+        self.alpha_f = alpha;
+        self.stall_hyst = 0.0;
+        self.unloaded_for = 1.0;
+        self.last_sink = 0.0;
+        self.fcs.i_theta = 0.0;
+        self.fcs.i_phi = 0.0;
+        self.fcs.i_beta = 0.0;
+        self.ctl.de = 0.0;
+        self.ctl.da = 0.0;
+        self.ctl.dr = 0.0;
+        self.ctl.steer = 0.0;
+        self.ctl.brake = 0.0;
+        let (_, d) = self.derivs(&self.x.clone(), &self.ctl.clone(), w_ned);
+        self.diag = d;
+    }
+
     /// Steady wings-level power-off glide (engine failed, propeller windmilling) at airspeed `v` and
     /// `flap`: solves α, elevator and flight-path angle for zero u̇, ẇ, q̇, so the elevator's trim drag
     /// is included. Returns the glide ratio, or None where no trim exists (below the stall).
@@ -667,6 +706,22 @@ mod tests {
         assert!(o.phi < 0.0, "right wing down is negative bank: {}", o.phi);
         assert!((o.v - v).abs() < 0.5);
         assert!(o.h > 400.0);
+    }
+
+    #[test]
+    fn airborne_start_reads_back_through_observe() {
+        let spec = c172_like();
+        let mut m = SixDof::on_runway(&spec);
+        let d = crate::units::D2R;
+        let wind = crate::units::Vec2 { x: -4.0, y: 2.0 };
+        m.set_airborne(-1500.0, 800.0, 450.0, 40.0, 0.06, 0.0, 2.0, 12.0 * d, -35.0 * d, [0.1, -0.05, 0.02], wind);
+        let o = m.observe();
+        assert!((o.x + 1500.0).abs() < 1e-6 && (o.y - 800.0).abs() < 1e-6 && (o.h - 450.0).abs() < 1e-6);
+        assert!((o.v - 40.0).abs() < 1e-6, "airspeed {}", o.v);
+        assert!((o.phi + 35.0 * d).abs() < 1e-9 && (o.theta - 12.0 * d).abs() < 1e-9, "phi {} theta {}", o.phi, o.theta);
+        assert!((o.p - 0.1).abs() < 1e-12 && (o.q + 0.05).abs() < 1e-12);
+        // with no sideslip the air-path heading is the nose heading
+        assert!(crate::units::wrap_pi(o.psi + o.beta - 2.0).abs() < 1e-6);
     }
 
     #[test]

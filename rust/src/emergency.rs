@@ -294,8 +294,9 @@ impl GlidePlanner {
     /// before the threshold to over the runway itself (any part of it will do), with at least
     /// `MIN_FINAL` of straight final before the touchdown, which may be anywhere from `aim_min` past the
     /// threshold to the farthest point that still leaves room to stop. Of the options reachable with the
-    /// planning margins, the most height in hand (relative to the path) wins up to `reserve`; past that, the touchdown
-    /// nearest the nominal aim point, then the longest final. With none reachable, the closest miss.
+    /// planning margins, the most height in hand (relative to the path) wins up to `reserve`; past that, the
+    /// predicted touchdown (aim point, plus whatever height full flap cannot burn on the final, flown off
+    /// long) nearest the nominal aim point, then the longest final. With none reachable, the closest miss.
     pub fn plan_for(&self, ac: &Aircraft, wind: Vec2, end: &RunwayEnd) -> GlideAssessment {
         let far = self.far_aim(wind, end);
         let nominal = self.spec.aim_point.min(far);
@@ -315,10 +316,18 @@ impl GlidePlanner {
             x += AIM_STEP;
         }
         aims.push(nominal);
-        // ranking, lowest first: height in hand up to the reserve, then touchdown nearest the nominal aim
-        // point, then the longest final
+        // ranking, lowest first: height in hand up to the reserve; then the touchdown nearest the nominal
+        // aim point, predicted with the drag the final can add: height beyond what full flap burns over
+        // the final is flown off long (so a high arrival prefers the longer final); then the longest final
         let reserve = self.spec.reserve;
-        let rank = |a: &GlideAssessment| ((-(a.surplus / a.required.max(1.0)).min(reserve)), (a.aim - nominal).abs(), -(a.ip_distance + a.aim));
+        let (g_clean, g_full) = (self.gradient(ac, wind, 0.0, 1.0, end), self.gradient(ac, wind, 30.0, 1.0, end));
+        let predicted = |a: &GlideAssessment| {
+            let fin = self.glide_final(ac, wind, end, a.ip_distance, a.aim);
+            let burnable = fin * (g_full - g_clean).max(0.0);
+            let excess = (a.available - a.required - burnable).max(0.0);
+            a.aim + excess / g_full
+        };
+        let rank = |a: &GlideAssessment| ((-(a.surplus / a.required.max(1.0)).min(reserve)), (predicted(a) - nominal).abs(), -(a.ip_distance + a.aim));
         let better = |a: (f64, f64, f64), b: (f64, f64, f64)| {
             a.0 < b.0 - 1e-6 || (a.0 <= b.0 + 1e-6 && (a.1 < b.1 - 1e-6 || (a.1 <= b.1 + 1e-6 && a.2 < b.2)))
         };

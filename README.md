@@ -430,29 +430,56 @@ The view is a perspective renderer drawn on the 2D canvas, so there is no depend
 - the flown track in 3D, coloured by phase, with its ground shadow
 - a low-poly C172 drawn at the real attitude: nose heading, pitch and bank
 
+## Random-state auto-land, touchdown accuracy and turn overshoot (23 Oct, evening)
+
+**Random airborne start** (page buttons *Random state* and *Random engine out*; `circuitsim randomland N`). The aircraft is placed 1.5–6 km from the field at a random height, heading, speed and attitude, with enough energy to reach the runway. Up to 70° bank and ±25° pitch are allowed. The autopilot then:
+1. **Recover:** rolls wings level at 20°/s. It unloads if α > 0.2 and never pulls beyond 60° bank. It holds level for 2 s. With the engine out, it pitches for best glide instead.
+2. **Rejoin:** flies a Dubins path at 80 kt and 25° bank to a final fix 1.5–6 km out. The fix distance follows the height to lose (descent gradient 0.09) or gain (climb 0.06). The aircraft slows to the base speed with flap 20 in the last 1.5 km.
+3. **Final:** flies the normal final and landing. With the engine out, it hands over to the glide planner after recovery. If the aircraft is far too high, it orbits down first (30° bank, 3 km from the field).
+
+**Touchdown accuracy.** Every runway landing now scores 100 points on the target touchdown point, minus 1 point per 3 m of miss in either direction. It is reported per suite as an average and counts in the autotune closeness term. The target is:
+- normal circuits: the aim point plus the planned float
+- glide-backs: the planner's chosen aim
+
+**Turn overshoot** (`cargo run --release --example overshoot`): the largest distance outside the planned ground track in the turn onto final.
+- A bank limit now keeps every turn at 1.2× the stall speed for that load factor (`BANK_STALL_MARGIN`). It is applied to powered and power-off turns alike.
+- Two tighter power-off settings were tried and dropped. Planning turns at 1.25 Vs√n halved the power-off median overshoot (38 → 18 m), but crosswind-leg failures became unreachable (8/71 → 0/71). Flying turns faster than planned was worse on every count.
+
+| Turn onto final | n | Median | 90% | Worst |
+|---|---|---|---|---|
+| Normal circuits | 22 | 16 m | 55 m | 80 m |
+| Power-off returns | 36 | 38 m | 52 m | 90 m |
+| Powered rejoins from a random state | 30 | 5 m | 24 m | 77 m |
+
+**Take-off flap** is 10°, retracted at 300 ft (seen in the traces as `fl10`).
+
 ## Results
 
-With the scoring from the 23 Oct review: every landing scored on touchdown speed and nose-up attitude, and glide-back returns also on centreline and crab. The figures are not comparable with earlier ones, which allowed 58 kt flat touchdowns.
+With the scoring from the 23 Oct review: every landing is scored on touchdown speed and nose-up attitude. Glide-back returns are also scored on centreline and crab. These figures can't be compared with earlier ones, which allowed 58 kt flat touchdowns.
 
-| Suite (native, 6DOF) | Now |
-|---|---|
-| `scenarios`: 14 cases × 2 circuits | 23/28 |
-| `stol`: 4 winds × 2 seeds per strip | 18/24 |
-| `engine`: 60 cases | 25/60; 24/36 within the physical ceiling |
-| `montecarlo 400`, normal circuits | 81% |
-| `montecarlo 400`, engine failures | 36%; 72/116 (62%) within the ceiling |
-| `xw_sweep` (crosswind-leg failures) | 14/71 |
+| Suite (native, 6DOF) | Now | Touchdown accuracy |
+|---|---|---|
+| `scenarios`: 14 cases × 2 circuits | 23/28 | 80 |
+| `stol`: 4 winds × 2 seeds per strip | 18/24 | |
+| `engine`: 60 cases | 21/60; 20/36 within the physical ceiling | |
+| `montecarlo 400`, normal circuits | 81% | 85 |
+| `montecarlo 400`, engine failures | 34%; 68/116 (59%) within the ceiling | 27 |
+| `randomland 100`, engine running | 84/100 (upsets 47/56) | 84 |
+| `randomland 100`, engine out | 49/100 | 31 |
+| `xw_sweep` (crosswind-leg failures) | 8/71 | |
 
-Monte Carlo engine failures by failure point (cases, within the ceiling, passed):
+The stall-margin bank limit costs some glide-back reach. Before it was added, the results were engine 25/60, Monte Carlo engine failures 36%, and xw_sweep 14/71. The limit is kept because a turn at 45° bank and best-glide speed has only about 1.1× the stall margin.
+
+Monte Carlo engine failures by failure point:
 
 | Failure point | Cases | Ceiling | Passed |
 |---|---|---|---|
 | Take-off roll 40 kt | 21 | 21 | 21 |
 | Climb 200 / 450 ft | 40 | 0 | 0 |
 | Crosswind leg | 22 | 15 | 5 |
-| Downwind early | 25 | 22 | 12 |
+| Downwind early | 25 | 22 | 10 |
 | Downwind mid | 19 | 19 | 12 |
-| Abeam threshold | 19 | 19 | 14 |
+| Abeam threshold | 19 | 19 | 12 |
 | Base | 18 | 6 | 1 |
 | Final 400 ft | 19 | 3 | 4 |
 | Final 150 ft | 31 | 11 | 8 |

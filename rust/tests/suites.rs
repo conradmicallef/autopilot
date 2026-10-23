@@ -69,3 +69,21 @@ fn suite_totals_do_not_regress() {
     assert!(engine >= g["engine"], "engine suite {engine} < {}", g["engine"]);
     assert!(within >= g["engine_within_ceiling"], "within ceiling {within} < {}", g["engine_within_ceiling"]);
 }
+
+#[test]
+fn random_airborne_starts_recover_and_land() {
+    // twelve random states (upsets included), engine running: most land, none hard
+    let mut rng = circuitsim::atmosphere::Rng::new(99.0);
+    let (mut passed, mut hard) = (0, 0);
+    for _ in 0..12 {
+        let mut s = new_sim(M, wind(270.0, 6.0, false), 1.0, high_circuit());
+        let a = circuitsim::simulation::AirStart::random(&s, &mut rng, false);
+        s.start_airborne(&a);
+        s.run(1500.0);
+        passed += s.passed() as usize;
+        hard += s.touchdown.as_ref().map_or(true, |t| t.sink / circuitsim::units::FT > 4.0) as usize;
+    }
+    eprintln!("random starts: {passed}/12 passed, {hard} hard or no landing");
+    assert!(passed >= include_str!("golden.txt").lines().find(|l| l.starts_with("random_starts")).and_then(|l| l.split_whitespace().nth(1)).and_then(|v| v.parse().ok()).unwrap_or(0));
+    assert_eq!(hard, 0);
+}

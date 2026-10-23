@@ -8,6 +8,8 @@ export interface Engine {
   /** Advance n 20 ms steps; true once stopped. */
   step(n: number): boolean;
   failEngine(): boolean;
+  /** Start from a random airborne state (an upset possibly), optionally with the engine out. */
+  randomStart(seed: number, engineOut: boolean): boolean;
   requestGoAround(): boolean;
   frame(): Frame;
 }
@@ -18,6 +20,7 @@ interface WasmExports {
   sim_set_wind(fromDeg: number, speedKt: number, gusts: number): void;
   sim_step(n: number): number;
   sim_fail_engine(): number;
+  sim_random_start(seed: number, engineOut: number): number;
   sim_request_go_around(): number;
   sim_frame(): number;
   sim_out_ptr(): number;
@@ -43,6 +46,7 @@ export class WasmEngine implements Engine {
   setWind(w: WindSettings): void { this.x.sim_set_wind(w.fromDeg, w.speedKt, w.gusts ? 1 : 0); }
   step(n: number): boolean { return this.x.sim_step(n) === 1; }
   failEngine(): boolean { return this.x.sim_fail_engine() === 1; }
+  randomStart(seed: number, engineOut: boolean): boolean { return this.x.sim_random_start(seed, engineOut ? 1 : 0) === 1; }
   requestGoAround(): boolean { return this.x.sim_request_go_around() === 1; }
   frame(): Frame {
     const n = this.x.sim_frame();

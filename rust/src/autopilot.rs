@@ -30,6 +30,10 @@ pub enum Phase {
     EoGlide,
     EoFinal,
     ForcedLanding,
+    /// Upset recovery from an arbitrary state: wings level, nose to the horizon, speed back.
+    Recover,
+    /// Powered path from wherever the recovery ended to a final fix for runway 09.
+    Rejoin,
 }
 
 impl Phase {
@@ -50,6 +54,8 @@ impl Phase {
             Phase::EoGlide => "EO_GLIDE",
             Phase::EoFinal => "EO_FINAL",
             Phase::ForcedLanding => "FORCED_LANDING",
+            Phase::Recover => "RECOVER",
+            Phase::Rejoin => "REJOIN",
         }
     }
     pub fn is_engine_out(self) -> bool {
@@ -211,12 +217,41 @@ const LINE_CAPTURE_K: f64 = 0.8;
 /// up to `PLAN_KEEP`), m: re-planning mid-turn costs height, so only for a clear gain.
 const SWITCH_GAIN: f64 = 20.0;
 const PLAN_KEEP: f64 = 60.0;
+/// Power-off orbit down: entered within `LOITER_RANGE` m of the field when the plan has more than
+/// `LOITER_ENTER` m of height to spare, left for a fresh plan below `LOITER_EXIT`; flown at `LOITER_BANK`°.
+const LOITER_RANGE: f64 = 3000.0;
+const LOITER_ENTER: f64 = 150.0;
+const LOITER_EXIT: f64 = 70.0;
+const LOITER_BANK: f64 = 30.0;
+/// Power-off turns are flown at this multiple of the planned turn speed (1: as planned).
+const TURN_SPEED_FLY: f64 = 1.0;
+/// Distance before a power-off turn at which the glide speed goes up to the turn's speed, m.
+const TURN_SPEED_LEAD: f64 = 300.0;
 /// The power-off path is made afresh when the aircraft is this far off it, m.
 const PATH_OFF: f64 = 80.0;
 /// On a power-off final, go back to planning a longer path when even full drag lands this far beyond
 /// the farthest usable aim point (as a fraction of the distance), above `REPLAN_FLOOR` ft.
 const REPLAN_LONG: f64 = 0.25;
 const REPLAN_FLOOR: f64 = 400.0;
+
+/// Upset recovery: roll and pitch slew rates (deg/s), the angle of attack above which it unloads before
+/// anything else (rad), the bank beyond which it does not pull (deg), and how long the exit limits must
+/// hold (s): bank within 10°, pitch within ±12°, flight-path angle within ±10°, airspeed 1.3 Vs–110 kt.
+const RECOVER_ROLL_RATE: f64 = 20.0;
+const RECOVER_PITCH_RATE: f64 = 8.0;
+const RECOVER_ALPHA: f64 = 0.20;
+const RECOVER_NO_PULL_BANK: f64 = 60.0;
+const RECOVER_HOLD: f64 = 2.0;
+/// Powered rejoin: speed (kt), bank (deg), the final-fix range (m before the threshold), and the
+/// steepest descent and climb gradients planned along the path.
+const REJOIN_SPEED: f64 = 80.0;
+const REJOIN_BANK: f64 = 25.0;
+const REJOIN_FIX_MIN: f64 = 1500.0;
+const REJOIN_FIX_MAX: f64 = 6000.0;
+const REJOIN_DESCENT: f64 = 0.09;
+const REJOIN_CLIMB: f64 = 0.06;
+/// Path still to fly to the fix below which the rejoin slows to the base speed with flap 20, m.
+const REJOIN_SLOW: f64 = 1500.0;
 
 /// The power-off drag ladder: flap settings, then a forward slip at flap 20, in order of glide gradient.
 /// The final picks the level whose glide lands nearest the aim point (never short of the nearest one).
@@ -260,6 +295,16 @@ pub struct Autopilot {
     drag: usize,
     /// The power-off path being followed (air-mass frame), when gliding to a final fix.
     eo_path: Option<EoPath>,
+    /// Orbiting down over the field to lose surplus height before the power-off path (+1 left, 0 = not).
+    loiter: f64,
+    /// Started from a random state with the engine out: the engine-failure decision waits for the
+    /// recovery to finish.
+    pending_engine_out: bool,
+    /// Seconds the recovery has been within its exit limits.
+    recovered_for: f64,
+    /// The powered rejoin path, and the final-fix height it aims for.
+    rejoin: Option<EoPath>,
+    rejoin_fix_h: f64,
     slip_side: f64,
     last_assess: f64,
     flare_k: f64,
@@ -314,6 +359,11 @@ impl Autopilot {
             eo_flaps: 0.0,
             drag: 0,
             eo_path: None,
+            loiter: 0.0,
+            pending_engine_out: false,
+            recovered_for: 0.0,
+            rejoin: None,
+            rejoin_fix_h: 0.0,
             slip_side: 0.0,
             last_assess: 0.0,
             flare_k: 0.28,
@@ -412,6 +462,7 @@ impl Autopilot {
         self.eo_flaps = 0.0;
         self.drag = 0;
         self.eo_path = None;
+        self.loiter = 0.0;
         self.last_assess = self.t;
         match plan {
             EngineOutPlan::Reject => self.set_phase(ac, Phase::Rejected),
@@ -443,6 +494,150 @@ impl Autopilot {
                 && wrap_pi(track - e.heading).abs() < 30.0 * D2R
                 && (to_thr > 0.0 || (over_runway && to_thr > -(len - emergency::MIN_FINAL)))
         })
+    }
+
+    /// Start from an arbitrary airborne state (`Simulation::start_airborne`): recover first; then, with
+    /// the engine running, rejoin to land on runway 09, or with it out, the engine-failure decision.
+    pub fn start_airborne(&mut self, ac: &Aircraft, engine_out: bool, note: String) {
+        self.engine_out = None;
+        self.glide = None;
+        self.eo_path = None;
+        self.rejoin = None;
+        self.pending_engine_out = engine_out;
+        self.recovered_for = 0.0;
+        self.descending = false;
+        self.go_arounds = 0;
+        self.go_around_requested = false;
+        self.stability.reset();
+        self.circuit.crosswind_x = None;
+        self.auto_throttle.engage(ac.thr);
+        self.climb.engage(ac.gamma);
+        self.glide_speed.engage(ac.gamma);
+        self.path.reset();
+        self.cmd = Commands { theta: ac.theta, phi: ac.phi, thr: ac.thr, flaps: ac.flap_pos, ..Default::default() };
+        self.phase = Phase::Recover;
+        self.log(ac, "RECOVER", Some(note));
+    }
+
+    /// Air-mass Dubins path to the runway-09 final fix `d` metres out, at the rejoin speed and bank.
+    fn rejoin_path(&self, ac: &Aircraft, wind: &Wind, d: f64) -> (crate::dubins::DubinsPath, f64) {
+        let v = REJOIN_SPEED * KT;
+        let r = v * v / (G * (REJOIN_BANK * D2R).tan());
+        let crab = clamp(emergency::across(wind.v, 0.0) / v, -0.6, 0.6).asin();
+        let start = crate::dubins::Pose { x: ac.x, y: ac.y, th: ac.psi };
+        dubins::air_mass_path(start, -d, 0.0, -crab, wind.v, v, r)
+    }
+
+    /// Choose the final fix: the nearest (at least `REJOIN_FIX_MIN` out) from which the height to the
+    /// glidepath at the fix can be lost, or gained, along the path at the planned gradients.
+    fn start_rejoin(&mut self, ac: &Aircraft, wind: &Wind) {
+        let mut pick = REJOIN_FIX_MAX;
+        let mut d = REJOIN_FIX_MIN;
+        while d <= REJOIN_FIX_MAX {
+            let (path, _) = self.rejoin_path(ac, wind, d);
+            let dh = ac.h - self.circuit.runway.glidepath_height(-d);
+            let len = path.length();
+            if dh <= len * REJOIN_DESCENT && dh >= -len * REJOIN_CLIMB {
+                pick = d;
+                break;
+            }
+            d += 250.0;
+        }
+        let (path, _) = self.rejoin_path(ac, wind, pick);
+        self.rejoin = Some(EoPath { follow: Follower::new(path), t0: self.t, wind: wind.v, end: "09", fix: pick });
+        self.rejoin_fix_h = self.circuit.runway.glidepath_height(-pick);
+        self.log(ac, "REJOIN", Some(format!("Final fix {:.1} km out at {} ft", pick / 1000.0, (self.rejoin_fix_h / FT).round())));
+        self.phase = Phase::Rejoin;
+    }
+
+    /// Upset recovery. Roll wings level the short way, fast; near the stall unload first; while steeply
+    /// banked do not pull (that only tightens the turn); then bring the nose to a level-flight attitude.
+    /// Power by speed: idle when fast or nose-low, full when slow.
+    fn recover(&mut self, ac: &Aircraft, wind: &Wind, dt: f64, c: &mut Commands) {
+        let vs = ac.stall_speed(ac.flap_pos);
+        let alpha = ac.alpha();
+        let near_stall = alpha > RECOVER_ALPHA || ac.v < 1.15 * vs;
+        c.roll_rate = Some(RECOVER_ROLL_RATE * D2R);
+        c.pitch_rate = Some(RECOVER_PITCH_RATE * D2R);
+        c.phi = 0.0;
+        c.theta = if near_stall {
+            (ac.theta - 6.0 * D2R).max(-15.0 * D2R)
+        } else if ac.phi.abs() > RECOVER_NO_PULL_BANK * D2R {
+            ac.theta.min(ac.shaper.theta)
+        } else if ac.engine_failed {
+            // no power: pitch for the best-glide speed (wings coming level first)
+            self.glide_pitch(ac, self.planner.spec.vbg, dt)
+        } else {
+            // level flight: the attitude is the angle of attack for 1 g at this speed (about α_f)
+            clamp(ac.alpha_f + 1.0 * D2R, -5.0 * D2R, 10.0 * D2R)
+        };
+        c.flaps = 0.0;
+        c.thr = if ac.engine_failed || ac.v > 100.0 * KT || ac.theta < -10.0 * D2R {
+            self.auto_throttle.engage(0.0);
+            0.0
+        } else if ac.v < 1.3 * vs {
+            self.auto_throttle.engage(1.0);
+            1.0
+        } else {
+            self.auto_throttle.update(ac, REJOIN_SPEED * KT, dt)
+        };
+        self.fma = Fma::new(if c.thr > 0.9 { "TOGA" } else if c.thr < 0.05 { "IDLE" } else { "SPD" }, if near_stall { "UNLOAD" } else { "RECOVER" }, "WINGS LVL");
+        // gliding, the flight path is a glide's (about −7°), not level
+        let gamma_lim = if ac.engine_failed { 12.0 } else { 10.0 };
+        let ok = ac.phi.abs() < 10.0 * D2R
+            && ac.theta.abs() < 12.0 * D2R
+            && ac.gamma.abs() < gamma_lim * D2R
+            && ac.v > 1.3 * vs
+            && ac.v < 110.0 * KT;
+        self.recovered_for = if ok { self.recovered_for + dt } else { 0.0 };
+        if self.recovered_for >= RECOVER_HOLD {
+            if self.pending_engine_out {
+                self.pending_engine_out = false;
+                // the engine-failure decision on the recovered state (estimated wind inside)
+                let w = wind.clone();
+                self.fail_engine(ac, &w);
+            } else {
+                self.start_rejoin(ac, wind);
+            }
+        }
+    }
+
+    /// Powered rejoin: follow the Dubins path to the final fix, descending to arrive there on the
+    /// glidepath, at the rejoin speed with flap 10; then the normal final.
+    fn rejoin_step(&mut self, ac: &Aircraft, wind: &Wind, dt: f64, c: &mut Commands) {
+        let bank = REJOIN_BANK * D2R;
+        let m = Motion { v: ac.v, phi: ac.phi, roll: ac.shaper.rates.phi, bank };
+        let Some(ep) = self.rejoin.as_mut() else { return };
+        let (qx, qy) = (ac.x - ep.wind.x * (self.t - ep.t0), ac.y - ep.wind.y * (self.t - ep.t0));
+        let st = ep.follow.steer(qx, qy, ac.psi, m);
+        let seg = ep.follow.seg;
+        let fix = ep.fix;
+        if st.offset > 150.0 {
+            // far off the path: make it afresh from here, same fix
+            let (path, _) = self.rejoin_path(ac, wind, fix);
+            self.rejoin = Some(EoPath { follow: Follower::new(path), t0: self.t, wind: wind.v, end: "09", fix });
+        }
+        c.phi = dubins::bank_command(&st, m, ac.psi, 3.0);
+        let gv = ac.ground_velocity(wind);
+        let gs = gv.x.hypot(gv.y).max(20.0);
+        let remaining = st.arc_left + st.straight_left;
+        let t_rem = (remaining / gs).max(15.0);
+        let vs = clamp(-(ac.h - self.rejoin_fix_h) / t_rem, -4.5, 3.0);
+        c.theta = self.path.vertical_speed(ac, vs, dt);
+        // the last stretch is flown like a base leg: base speed and flap 20, so the final can slow to
+        // the approach speed before the stabilised-approach gate
+        let base_like = remaining < REJOIN_SLOW;
+        c.thr = self.auto_throttle.update(ac, if base_like { self.circuit.spec.vbase } else { REJOIN_SPEED * KT }, dt);
+        c.flaps = if base_like { 20.0 } else { 10.0 };
+        let what = if st.turn > 0.0 { "L" } else if st.turn < 0.0 { "R" } else { "TO" };
+        self.fma = Fma::new("SPD", "V/S", &format!("{what} FIX 09"));
+        let track_err = wrap_pi(ac.track(wind)).abs();
+        let turned = seg == 3 || (seg == 2 && st.to_go < 15.0 * D2R);
+        if turned && ac.y.abs() < 150.0 && track_err < 30.0 * D2R && ac.x < 0.0 {
+            self.descending = true;
+            self.stability.reset();
+            self.set_phase(ac, Phase::Final);
+        }
     }
 
     fn turn_radius(&self, ac: &Aircraft, wind: &Wind) -> f64 {
@@ -820,6 +1015,8 @@ impl Autopilot {
                     self.fma = Fma::new("—", "—", "—");
                 }
             }
+            Phase::Recover => self.recover(ac, wind, dt, &mut c),
+            Phase::Rejoin => self.rejoin_step(ac, wind, dt, &mut c),
             Phase::EoGlide => self.eo_glide(ac, wind, t, dt, &mut c),
             Phase::EoFinal => self.eo_final(ac, wind, dt, &mut c, &s),
             Phase::ForcedLanding => {
@@ -850,6 +1047,8 @@ impl Autopilot {
         // flown slow cannot become an accelerated stall (floor BANK_FLOOR so the aircraft can always turn)
         if !ac.on_ground {
             let vs = ac.stall_speed(ac.flap_pos);
+            // (a smaller margin for power-off turns, 1.15, tightened them but cost a fifth of the power-off
+            // landings in the Monte Carlo set: one margin for all flight)
             let cos_min = (BANK_STALL_MARGIN * vs / ac.v.max(1.0)).powi(2);
             let lim = if cos_min >= 1.0 { 0.0 } else { cos_min.acos() }.max(BANK_FLOOR * D2R);
             c.phi = clamp(c.phi, -lim, lim);
@@ -881,6 +1080,23 @@ impl Autopilot {
         c.thr = 0.0;
         c.flaps = self.eo_flaps;
         let bank = self.planner.spec.turn_bank;
+        // far too high close to the field: orbit down first (a path cannot burn it all)
+        if self.loiter != 0.0 {
+            c.phi = self.loiter * LOITER_BANK * D2R;
+            c.theta = self.glide_pitch(ac, self.planner.turn_speed(ac, ac.shaper.phi, self.eo_flaps), dt);
+            self.fma = Fma::new("ENG OUT", "GLIDE", "ORBIT");
+            if t - self.last_assess > 1.0 {
+                self.last_assess = t;
+                let fresh = self.planner.plan(ac, w, Some(&end));
+                if (fresh.reachable && fresh.surplus < LOITER_EXIT) || (!fresh.reachable && fresh.available < fresh.required) {
+                    self.loiter = 0.0;
+                    self.eo_path = None;
+                    self.log(ac, "REPLAN", Some(format!("Orbit done: runway {}, aiming {} m in", fresh.end.name, fresh.aim.round())));
+                    self.glide = Some(fresh);
+                }
+            }
+            return;
+        }
         let stale = match &self.eo_path {
             None => true,
             Some(p) => p.end != end.name || (p.fix - g.ip_distance).abs() > 1.0,
@@ -900,7 +1116,13 @@ impl Autopilot {
         }
         // bank: the arc's feed-forward, plus a correction from the heading error (3 s to take it out)
         c.phi = dubins::bank_command(&st, m, ac.psi, 3.0);
-        c.theta = self.glide_pitch(ac, self.planner.turn_speed(ac, ac.shaper.phi, self.eo_flaps), dt);
+        // speed for the turn from before it starts: if it only rose once the bank was on, the stall-margin
+        // limit would hold the bank below the planned one and the turn would run wide
+        let turning = st.turn != 0.0 || (seg == 1 && st.straight_left < TURN_SPEED_LEAD && st.arc_left > 1.0);
+        // (flying turns faster than planned, or planning them at 1.25 Vs√n, tightened them but cost
+        // reachability: crosswind-leg returns fell to 0/71; the planned speed is flown)
+        let v = if turning { TURN_SPEED_FLY * self.planner.turn_speed(ac, bank, self.eo_flaps) } else { self.planner.turn_speed(ac, ac.shaper.phi, self.eo_flaps) };
+        c.theta = self.glide_pitch(ac, v, dt);
         let what = if st.turn > 0.0 { "L" } else if st.turn < 0.0 { "R" } else { "TO" };
         self.fma = Fma::new("ENG OUT", "GLIDE", &format!("{what} FIX {}", end.name));
         // joined the final: lined up, the path's last turn done (or nearly), at or near the join point
@@ -914,6 +1136,17 @@ impl Autopilot {
             self.last_assess = t;
             // keep the plan while it works, unless a fresh one is clearly better: it reaches when this one
             // no longer does, or has `SWITCH_GAIN` more height in hand
+            let near_field = (ac.x - 0.5 * self.planner.runway.length).hypot(ac.y) < LOITER_RANGE;
+            if near_field && g.surplus > LOITER_ENTER {
+                let fresh = self.planner.plan(ac, w, Some(&end));
+                if fresh.surplus > LOITER_ENTER {
+                    // orbit toward the runway side of the aircraft
+                    let to_rwy = (-ac.y).atan2(0.5 * self.planner.runway.length - ac.x);
+                    self.loiter = if wrap_pi(to_rwy - ac.track(wind)) >= 0.0 { 1.0 } else { -1.0 };
+                    self.log(ac, "ORBIT", Some(format!("{} m of height to lose: orbiting down", fresh.surplus.round())));
+                    return;
+                }
+            }
             let mut keep = self.planner.assess_along(ac, w, &end, g.ip_distance, g.aim, arc_left, straight_left);
             keep.route = g.route.clone();
             let fresh = self.planner.plan(ac, w, Some(&end));

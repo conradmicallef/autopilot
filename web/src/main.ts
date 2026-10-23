@@ -67,6 +67,16 @@ class App {
     $('ga').onclick = () => { this.engine.requestGoAround(); };
     // an engine failure drops to real time, so the glide and the decisions can be followed
     $('eng').onclick = () => { this.engine.failEngine(); this.setWarp(1); };
+    // auto-land from a random state: a new flight that starts in the air, possibly upset, at real time
+    const randomStart = (engineOut: boolean) => {
+      this.reset();
+      this.engine.randomStart((Math.random() * 1e6) | 1, engineOut);
+      this.track = []; this.logCount = -1; this.critKey = '';
+      this.f = this.engine.frame(); this.track.push(...this.f.newTrack);
+      this.setWarp(1); this.running = true; this.last = performance.now(); this.updateRunLabel();
+    };
+    $('rnd').onclick = () => randomStart(false);
+    $('rndEo').onclick = () => randomStart(true);
     $('warp').addEventListener('click', e => {
       const b = (e.target as HTMLElement).closest('button'); if (!b) return;
       this.setWarp(Number(b.dataset.w));
@@ -208,7 +218,7 @@ class App {
       const info = (PHASES as Record<string, { name: string; token: string } | undefined>)[e.phase];
       const marker: Record<string, [string, string]> = {
         DESCENT: ['Begin descent', '--muted'], ENGINE_FAILURE: ['Engine failure', '--ph-eo'], STRETCH: ['Stretch to runway', '--ph-eo'],
-      REPLAN: ['New glide plan', '--ph-eo'], EXTEND: ['Longer path (high)', '--ph-eo']
+      REPLAN: ['New glide plan', '--ph-eo'], EXTEND: ['Longer path (high)', '--ph-eo'], ORBIT: ['Orbit down (high)', '--ph-eo']
       };
       const [name, tok] = info ? [info.name, info.token] : marker[e.phase] ?? [e.phase.replace(/_/g, ' ').toLowerCase(), '--muted'];
       return `<span class="mut l">${mmss(e.t)}</span><span class="ph" style="color:var(${tok})">${name}${e.note ? `<small>${e.note}</small>` : ''}</span>`

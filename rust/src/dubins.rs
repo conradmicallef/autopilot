@@ -219,6 +219,19 @@ pub fn bank_command(st: &Steer, m: Motion, psi: f64, tau: f64) -> f64 {
     (st.ff * m.bank + corr).clamp(-lim, lim)
 }
 
+/// Shortest path in the air mass from `start` to a fix fixed to the ground (`fx`, `fy`, air heading `th`):
+/// in the air-mass frame the fix moves upwind by wind × the time to get there (3 iterations at speed
+/// `v`, radius `r`). Returns the path and that time.
+pub fn air_mass_path(start: Pose, fx: f64, fy: f64, th: f64, wind: crate::units::Vec2, v: f64, r: f64) -> (DubinsPath, f64) {
+    let mut t = 0.0;
+    let mut path = shortest(start, Pose { x: fx, y: fy, th }, r);
+    for _ in 0..3 {
+        path = shortest(start, Pose { x: fx - wind.x * t, y: fy - wind.y * t, th }, r);
+        t = path.length() / v;
+    }
+    (path, t)
+}
+
 /// One CSC candidate, or None where the geometry has no such path (an inner tangent between circles that overlap).
 fn candidate(p0: Pose, p1: Pose, r: f64, s0: f64, s1: f64) -> Option<DubinsPath> {
     let c0 = (p0.x - s0 * r * p0.th.sin(), p0.y + s0 * r * p0.th.cos());

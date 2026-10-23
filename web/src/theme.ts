@@ -21,7 +21,10 @@ export const ENGINE_OUT_INFO: (PhaseInfo & { index: number })[] = [
   { phase: 'REJECTED', name: 'Rejected take-off', token: '--ph-eo', index: 1 },
   { phase: 'EO_GLIDE', name: 'Glide to runway', token: '--ph-eo', index: 5 },
   { phase: 'EO_FINAL', name: 'Power-off final', token: '--ph-eo', index: 6 },
-  { phase: 'FORCED_LANDING', name: 'Forced landing', token: '--ph-eo', index: 6 }
+  { phase: 'FORCED_LANDING', name: 'Forced landing', token: '--ph-eo', index: 6 },
+  // random-state starts: recovery, then a powered path to final (shaded like base)
+  { phase: 'RECOVER', name: 'Upset recovery', token: '--ph-ga', index: 4 },
+  { phase: 'REJOIN', name: 'Rejoin to final', token: '--ph-base', index: 5 }
 ];
 
 export const PHASES: Record<Phase, PhaseInfo & { index: number }> = Object.fromEntries([

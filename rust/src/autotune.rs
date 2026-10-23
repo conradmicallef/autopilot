@@ -123,6 +123,10 @@ pub fn closeness(s: &Simulation) -> f64 {
         c += clamp((td.v - (limit - 3.0 * KT)) / (4.0 * KT), 0.0, 1.0);
         c += clamp((crate::simulation::TD_PITCH_MIN + 2.0 - td.pitch / D2R) / 3.0, 0.0, 1.0);
     }
+    // touchdown accuracy: a soft pull toward the target touchdown point
+    if let Some((miss, _)) = s.accuracy() {
+        c += clamp((miss.abs() - 40.0) / 160.0, 0.0, 1.0);
+    }
     if s.autopilot.engine_out.is_none() {
         let rwy = s.runway();
         let limit = if s.autopilot.procedure.short_field { rwy.aim_point + 100.0 } else { rwy.length / 3.0 };

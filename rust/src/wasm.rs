@@ -79,6 +79,20 @@ pub extern "C" fn sim_fail_engine() -> u32 {
     with(|h| h.sim.fail_engine() as u32).unwrap_or(0)
 }
 
+/// Put the current simulation into a random airborne state (an upset possibly), to recover and land;
+/// `engine_out` != 0 also stops the engine. Returns 1 when started.
+#[no_mangle]
+pub extern "C" fn sim_random_start(seed: f64, engine_out: u32) -> u32 {
+    with(|h| {
+        let mut rng = crate::atmosphere::Rng::new(seed);
+        let a = crate::simulation::AirStart::random(&h.sim, &mut rng, engine_out != 0);
+        h.sim.start_airborne(&a);
+        h.track_cursor = 0;
+        1
+    })
+    .unwrap_or(0)
+}
+
 #[no_mangle]
 pub extern "C" fn sim_request_go_around() -> u32 {
     with(|h| h.sim.request_go_around() as u32).unwrap_or(0)
