@@ -185,6 +185,9 @@ const VFE_10: f64 = 110.0;
 const VFE_FULL: f64 = 85.0;
 /// Bank limit: airspeed over the stall speed at the turn's load factor.
 const BANK_STALL_MARGIN: f64 = 1.2;
+/// Steepest bank for closing a circuit turn onto its leg when the wind or the speed widens it (the turn
+/// is planned at the circuit's 25°).
+const TURN_BANK_MAX: f64 = 30.0 * D2R;
 /// Bank always allowed, deg.
 const BANK_FLOOR: f64 = 15.0;
 /// Heights, ft: bank limited to 10° below LOW_BANK in the initial climb; near the ground below
@@ -653,6 +656,9 @@ impl Autopilot {
     }
     fn glide_pitch(&mut self, ac: &Aircraft, v: f64, dt: f64) -> f64 {
         let g = self.glide_speed.update(ac, v, dt, -0.35);
+        // (a feed-forward lowering the nose by (n² − 1)/(2·L/D) as the bank comes on held the speed
+        // through power-off turns and cut their overshoot, median 38 → 31 m, but Monte Carlo power-off
+        // landings fell from 37% to 33%: left out)
         self.path.gamma(ac, g, dt)
     }
     fn flare_if_low(&mut self, ac: &Aircraft) {
@@ -682,6 +688,55 @@ impl Autopilot {
     }
     fn turn_lead(&self, ac: &Aircraft, wind: &Wind) -> f64 {
         self.guidance.turn_lead(ac, wind, self.circuit.spec.bank_max, ac.shaper.rates.phi)
+    }
+    /// Bank that closes a turn onto `leg` exactly on its line: from the air-mass relation above, solved
+    /// for the radius, R = e / ((1 − cos Δ) + w_n·Δ/v). The turn starts at the planning bank (25°) and
+    /// steepens to TURN_BANK_MAX if the wind or the speed widens it. None once within 25° of the leg's
+    /// direction, or when no turn is needed (the line follower then captures).
+    fn closing_bank(&self, ac: &Aircraft, wind: &Wind, leg: Leg) -> Option<f64> {
+        let (a, b) = self.circuit.leg_ends(leg);
+        let (dx, dy) = (b[0] - a[0], b[1] - a[1]);
+        let l = dx.hypot(dy);
+        let (ux, uy) = (dx / l, dy / l);
+        let e = ux * (ac.y - a[1]) - uy * (ac.x - a[0]);
+        let (nx, ny) = if e >= 0.0 { (uy, -ux) } else { (-uy, ux) };
+        let d = wrap_pi(uy.atan2(ux) - ac.psi);
+        let delta = d.abs();
+        if delta < 25.0 * D2R {
+            return None;
+        }
+        // turn direction: the short way, except near 180° where it is the way that closes on the line
+        let left = if delta > 150.0 * D2R { -ac.psi.sin() * nx + ac.psi.cos() * ny > 0.0 } else { d > 0.0 };
+        let v = ac.v.max(20.0);
+        let w_n = wind.v.x * nx + wind.v.y * ny;
+        let den = (1.0 - delta.cos()) + w_n * delta / v;
+        let bank = if den <= 0.0 || e.abs() < 1.0 { TURN_BANK_MAX } else { (v * v * den / (G * e.abs())).atan() };
+        let bank = clamp(bank, 0.0, TURN_BANK_MAX);
+        Some(if left { bank } else { -bank })
+    }
+    /// Distance from the next leg's line at which to start turning onto it. The turn is flown in the air
+    /// mass: from the current air heading to the leg's direction (Δ) at the bank limit, a circle of radius
+    /// R = v²/(g·tan φ) that closes on the line by R(1 − cos Δ), while the wind carries the aircraft
+    /// toward (or away from) the line for the turn's duration. Rolling in takes φ/p, flown about half of
+    /// it on the old heading. A short base after a tailwind turn therefore starts the turn earlier: it
+    /// can begin before the aircraft has finished the turn onto base.
+    fn turn_lead_to(&self, ac: &Aircraft, wind: &Wind, next: Leg) -> f64 {
+        let (a, b) = self.circuit.leg_ends(next);
+        let (dx, dy) = (b[0] - a[0], b[1] - a[1]);
+        let l = dx.hypot(dy);
+        let (ux, uy) = (dx / l, dy / l);
+        // unit normal from the aircraft toward the line
+        let e = ux * (ac.y - a[1]) - uy * (ac.x - a[0]);
+        let (nx, ny) = if e >= 0.0 { (uy, -ux) } else { (-uy, ux) };
+        let bank = self.circuit.spec.bank_max;
+        let v = ac.v.max(20.0);
+        let r = v * v / (G * bank.tan());
+        let delta = wrap_pi(uy.atan2(ux) - ac.psi).abs();
+        let t_turn = delta * r / v;
+        let w_n = wind.v.x * nx + wind.v.y * ny;
+        let gv = ac.ground_velocity(wind);
+        let t_roll = bank / ac.shaper.rates.phi;
+        (r * (1.0 - delta.cos()) + w_n * t_turn + (gv.x * nx + gv.y * ny) * 0.5 * t_roll).max(0.0)
     }
     fn alt_hold_with_speed(&mut self, ac: &Aircraft, v: f64, dt: f64, c: &mut Commands) {
         if self.fma.vert != "ALT" {
@@ -821,7 +876,7 @@ impl Autopilot {
                     self.fma.lat = "LEG XWND".into();
                     let (bank, remaining) = self.leg_bank(ac, wind, Leg::Crosswind, s.bank_max);
                     c.phi = bank;
-                    if remaining < self.turn_lead(ac, wind) {
+                    if remaining < self.turn_lead_to(ac, wind, Leg::Downwind) {
                         self.set_phase(ac, Phase::Downwind);
                     }
                 }
@@ -847,10 +902,15 @@ impl Autopilot {
                         self.path.vertical_speed(ac, clamp(0.15 * (s.base_floor - ac.h), s.descent_vs, 0.5), dt)
                     };
                     c.thr = self.auto_throttle.update(ac, s.vdescent, dt);
+                } else if ac.x < 0.0 {
+                    // abeam the threshold: slow to the descent speed with flap 10 before turning base, so
+                    // the base turn is flown at 75 kt rather than 90 (radius ∝ v²: about 30% tighter)
+                    c.flaps = 10.0;
+                    self.alt_hold_with_speed(ac, s.vdescent, dt, &mut c);
                 } else {
                     self.alt_hold_with_speed(ac, s.vdownwind, dt, &mut c);
                 }
-                if remaining < self.turn_lead(ac, wind) {
+                if remaining < self.turn_lead_to(ac, wind, Leg::Base) {
                     self.set_phase(ac, Phase::Base);
                 }
             }
@@ -859,11 +919,18 @@ impl Autopilot {
                 self.fma.vert = "V/S".into();
                 c.flaps = 20.0;
                 let (bank, remaining) = self.leg_bank(ac, wind, Leg::Base, s.bank_max);
-                c.phi = bank;
+                c.phi = self.closing_bank(ac, wind, Leg::Base).unwrap_or(bank);
                 if s.profile_descent {
                     self.fma.vert = "PATH".into();
                     let ph = self.circuit.profile_height(false, ac.x, ac.y, self.turn_radius(ac, wind));
-                    let vs = self.path_vs(ac, wind, ph);
+                    let mut vs = self.path_vs(ac, wind, ph);
+                    // speed before path at idle: above the flap-20 limit the flaps can't come out, and
+                    // following a steep path would only gain more speed (a wider turn onto final); descend
+                    // less until the speed is back, the final's steeper path takes up the height
+                    let over = ac.v - (s.vbase + 5.0 * KT);
+                    if over > 0.0 && ac.thr < 0.05 {
+                        vs = (vs + 0.8 * over).min(0.0);
+                    }
                     c.theta = self.path.vertical_speed(ac, vs, dt);
                 } else {
                     let floor = self.circuit.runway.glidepath_height(ac.x).min(s.base_floor);
@@ -872,8 +939,17 @@ impl Autopilot {
                 c.thr = self.auto_throttle.update(ac, s.vbase, dt);
                 if self.go_around_requested {
                     self.start_go_around(ac, "Pilot request");
-                } else if remaining < self.turn_lead(ac, wind) {
-                    self.set_phase(ac, Phase::Final);
+                } else if remaining < self.turn_lead_to(ac, wind, Leg::Final) {
+                    // the turn onto final is due. On a short base (a tailwind widened the turn onto it)
+                    // that is before the aircraft has finished turning onto base: the turn carries on
+                    // through as one, and the final's speed and glide path take over once it is within
+                    // 100° of the runway heading
+                    if let Some(b) = self.closing_bank(ac, wind, Leg::Final) {
+                        c.phi = b;
+                    }
+                    if wrap_pi(-ac.psi).abs() <= 100.0 * D2R {
+                        self.set_phase(ac, Phase::Final);
+                    }
                 }
             }
             Phase::Final => {
@@ -884,8 +960,11 @@ impl Autopilot {
                     let line = self.circuit.leg_ends(Leg::Final);
                     self.align(ac, wind, &mut c, 0.0, Some(line));
                 } else {
-                    c.phi =
-                        self.leg_bank(ac, wind, Leg::Final, if ac.h < NEAR_GROUND * FT { 10.0 * D2R } else { s.bank_max }).0;
+                    let lim = if ac.h < NEAR_GROUND * FT { 10.0 * D2R } else { s.bank_max };
+                    c.phi = match self.closing_bank(ac, wind, Leg::Final) {
+                        Some(b) if ac.h >= NEAR_GROUND * FT => b,
+                        _ => self.leg_bank(ac, wind, Leg::Final, lim).0,
+                    };
                 }
                 let gvx = ac.ground_velocity(wind).x;
                 let rwy = &self.circuit.runway;

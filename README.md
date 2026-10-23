@@ -447,9 +447,22 @@ The view is a perspective renderer drawn on the 2D canvas, so there is no depend
 
 | Turn onto final | n | Median | 90% | Worst |
 |---|---|---|---|---|
-| Normal circuits | 22 | 16 m | 55 m | 80 m |
+| Normal circuits | 22 | 12 m | 22 m | 27 m |
 | Power-off returns | 36 | 38 m | 52 m | 90 m |
 | Powered rejoins from a random state | 30 | 5 m | 24 m | 77 m |
+
+**Circuit turns started earlier (23 Oct, later).** The worst normal-circuit overshoots were all a tailwind on base, on the High circuit's 1,000 m base: the aircraft started the base turn at 90 kt, the tailwind carried it through the final, and it ended up to 80 m beyond the centreline. Three changes:
+1. **Turn lead in the air mass.** The distance from the next leg's line at which to start a turn is now R(1 − cos Δ) + w·T + half the roll-in distance. Δ is the heading still to turn, R the air-mass radius at the planning bank of 25°, and w·T the wind's drift toward the line during the turn. The old lead used R = vg²/(g·tan φ) for a fixed 90°. On a short base the turn onto final now starts before the turn onto base is finished, and is flown as one turn. Final's speed and glide path take over within 100° of the runway heading.
+2. **Closing bank.** During the turn the bank is the one that ends the circle on the line, R = e / ((1 − cos Δ) + w·Δ/v). It starts at 25° and steepens up to 30° if the wind or the speed widens the turn. The stall-margin limit still applies.
+3. **Slower into base.** The aircraft slows to 75 kt with flap 10 abeam the threshold. On the base descent, at idle and more than 5 kt above the base speed, it descends less until the speed comes back. Otherwise flap 20 can't come out, and a steep path only adds speed.
+
+Normal-circuit overshoot fell from a median of 16 m and a worst case of 80 m to 12 m and 27 m. Monte Carlo normal circuits went from 81% to 83%, engine failures from 34% to 37% (67% within the ceiling), and stol from 18/24 to 20/24.
+
+Two changes to power-off turns were tried and dropped:
+- Rolling into the arcs earlier (0.7 of the roll time instead of 0.5) cut their overshoot (median 38 → 28 m). But Monte Carlo power-off landings fell to 31%, and crosswind-leg returns to 2/71.
+- A pitch feed-forward for the bank held the speed through the turn (median 31 m), but power-off landings fell to 33%.
+
+The power-off plan's height budget has no slack for a wider or earlier turn, so those turns stay as planned.
 
 **Take-off flap** is 10°, retracted at 300 ft (seen in the traces as `fl10`).
 
@@ -459,12 +472,12 @@ With the scoring from the 23 Oct review: every landing is scored on touchdown sp
 
 | Suite (native, 6DOF) | Now | Touchdown accuracy |
 |---|---|---|
-| `scenarios`: 14 cases × 2 circuits | 23/28 | 80 |
-| `stol`: 4 winds × 2 seeds per strip | 18/24 | |
-| `engine`: 60 cases | 21/60; 20/36 within the physical ceiling | |
-| `montecarlo 400`, normal circuits | 81% | 85 |
-| `montecarlo 400`, engine failures | 34%; 68/116 (59%) within the ceiling | 27 |
-| `randomland 100`, engine running | 84/100 (upsets 47/56) | 84 |
+| `scenarios`: 14 cases × 2 circuits | 22/28 | 81 |
+| `stol`: 4 winds × 2 seeds per strip | 20/24 | |
+| `engine`: 60 cases | 21/60; 20/33 within the physical ceiling | |
+| `montecarlo 400`, normal circuits | 83% | 84 |
+| `montecarlo 400`, engine failures | 37%; 76/113 (67%) within the ceiling | 24 |
+| `randomland 100`, engine running | 85/100 (upsets 48/56) | 83 |
 | `randomland 100`, engine out | 49/100 | 31 |
 | `xw_sweep` (crosswind-leg failures) | 8/71 | |
 

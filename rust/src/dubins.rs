@@ -132,7 +132,10 @@ impl Motion {
         let p = self.phi.abs().max(5.0 * D2R_);
         0.5 * (9.80665 * p.tan() / self.v) * (p / self.roll)
     }
-    /// Distance flown while rolling from level to the path's bank (half the roll time).
+    /// Distance flown while rolling from level to the path's bank (half the roll time). Starting earlier
+    /// (0.7 or 0.9 of the roll time) cut the power-off overshoot (median 38 → 28 / 10 m) but the turns ended
+    /// inside the plan's height budget less often: Monte Carlo power-off landings fell from 37% to 31%,
+    /// crosswind-leg returns from 8/71 to 2/71.
     pub fn rollin_distance(&self) -> f64 {
         self.v * (self.bank / self.roll) * 0.5
     }
